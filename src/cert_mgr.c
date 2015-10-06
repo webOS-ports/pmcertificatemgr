@@ -1152,14 +1152,17 @@ CertReturnCode CertGetX509(const char *pkg_path, void *pass, X509 **o_cert)
             DPRINTF("%s p12 pfx file\n", __FUNCTION__);
             result = p12ToX509(pkg_path, pass, o_cert, &key, &ca);
 
-            if (key != NULL)
+            if (result == CERT_OK)
             {
-                EVP_PKEY_free(key);
-            }
+                if (key != NULL)
+                {
+                    EVP_PKEY_free(key);
+                }
 
-            if (ca != NULL)
-            {
-                sk_X509_free(ca);
+                if (ca != NULL)
+                {
+                    sk_X509_free(ca);
+                }
             }
 
             return result;
@@ -1383,7 +1386,7 @@ static CertReturnCode p12ToFile(const char *pkg_path, const char *dst_path, Cert
 
     if (result != CERT_OK)
     {
-        goto done;
+        return result;
     }
 
     *o_sn = sn;
@@ -1672,7 +1675,7 @@ static CertReturnCode pemToFile(const char *cert_path, const char *dst_path, Cer
         return CERT_FILE_ACCESS_FAILURE;
     }
 
-    base_name = fileBaseName(pCertPath);
+    base_name = fileBaseName(cert_path);
 
     if (base_name == NULL)
     {

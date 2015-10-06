@@ -126,7 +126,7 @@ CertReturnCode cmutils_strdsvcat(char *o_dst, size_t dst_size, const char *src, 
         return CERT_INVALID_ARG;
     }
 
-    req_len = strlen(oline);
+    req_len = strlen(src);
 
     /* Append comma if the output string isn't empty */
     if ((dst_len > 0) && (o_dst[dst_len - 1] != delim))
@@ -552,7 +552,7 @@ char* getPathBySerialCtr(const char *base_name, CertDestDir dst_dir_type, CertOb
         (obj_type >= CERT_OBJECT_MAX_OBJECT) ||
         (count < 0))
     {
-        return CERT_INVALID_ARG;
+        return NULL;
     }
 
     switch (dst_dir_type)
@@ -578,12 +578,12 @@ char* getPathBySerialCtr(const char *base_name, CertDestDir dst_dir_type, CertOb
         break;
 
     default:
-        return CERT_UNKNOWN_PROPERTY;
+        return NULL;
     }
 
     if (CertCfgGetObjectStrValue(cfg_prop, cfg_dir, sizeof(cfg_dir)) != CERT_OK)
     {
-        return CERT_GENERAL_FAILURE;
+        return NULL;
     }
 
     if (count == 0)
@@ -594,7 +594,7 @@ char* getPathBySerialCtr(const char *base_name, CertDestDir dst_dir_type, CertOb
                      sn,
                      obj_fexts[obj_type]) >= sizeof(full_path))
         {
-            return CERT_PATH_LIMIT_EXCEEDED;
+            return NULL;
         }
     }
     else if (snprintf(full_path, sizeof(full_path), "%s/%s%X_%d.%s",
@@ -604,7 +604,7 @@ char* getPathBySerialCtr(const char *base_name, CertDestDir dst_dir_type, CertOb
                       count - 1,
                       obj_fexts[obj_type]) >= sizeof(full_path))
     {
-        return CERT_PATH_LIMIT_EXCEEDED;
+        return NULL;
     }
 
     return strdup(full_path);
@@ -711,7 +711,7 @@ CertReturnCode makePath(const char *file, CertCfgProperty file_type, char *o_pat
     }
 
     /* Don't dereference NULL pointers */
-    if (path == NULL)
+    if (o_path == NULL)
     {
         return CERT_NULL_BUFFER;
     }
@@ -773,12 +773,12 @@ CertReturnCode makePath(const char *file, CertCfgProperty file_type, char *o_pat
             return result;
         }
 
-        if (snprintf(path, len, "%s/%s/%s", root_path, targ_path, file) >= len)
+        if (snprintf(o_path, len, "%s/%s/%s", root_path, targ_path, file) >= len)
         {
             return CERT_INSUFFICIENT_BUFFER_SPACE;
         }
     }
-    else if (snprintf(path, len, "%s/%s", root_path, file) >= len)
+    else if (snprintf(o_path, len, "%s/%s", root_path, file) >= len)
     {
         return CERT_INSUFFICIENT_BUFFER_SPACE;
     }
@@ -819,6 +819,9 @@ CertReturnCode certSerialNumberToFileName(const int sn, char *o_buf, int len)
 
 int cmutils_mkdirp(const char *path)
 {
+    /* FIXME: Need to normalize the path to avoid situations where
+     * we create directories which aren't actually parents at all
+     * (e.g. "/var/usr/local/bin/blah/../../../../../home/user") */
     int rc;
     char *path_cpy;
     struct stat statbuf;
@@ -902,13 +905,13 @@ int cmutils_mkdirp(const char *path)
     }
 
 end:
-    free(path);
+    free(path_cpy);
     return rc;
 }
 
 int cmutils_touchp(const char *path, const char *data)
 {
-    int fd;
+    int fd, rc;
     struct stat statbuf;
 
     if (path == NULL)
@@ -916,9 +919,9 @@ int cmutils_touchp(const char *path, const char *data)
         return -1;
     }
 
+    /* Make sure the parent dir exists */
     if ((stat(path, &statbuf) != 0) && (errno == ENOENT))
     {
-        /* Make sure the parent dir exists */
         char *parent = strdup(path);
 
         if (parent == NULL)
@@ -932,7 +935,7 @@ int cmutils_touchp(const char *path, const char *data)
 
         if (rc != 0)
         {
-            return rc;
+            goto done;
         }
     }
 
@@ -942,14 +945,22 @@ int cmutils_touchp(const char *path, const char *data)
     {
         return -1;
     }
-    else if (data)
+
+    if ((data != NULL) &&
+        (data[0] != '\0') &&
+        (write(fd, data, strlen(data)) < 0))
     {
-        write(fd, data, strlen(data));
+        rc = -1;
+    }
+    else
+    {
+        rc = 0;
     }
 
     close(fd);
 
-    return 0;
+done:
+    return rc;
 }
 
 int cmutils_rmdeadlinks(const char *path, int recursive)
@@ -1053,7 +1064,7 @@ cleanup:
 int cmutils_exists(const char *path)
 {
     struct stat buf;
-    return stat(file, &buf) == 0;
+    return stat(path, &buf) == 0;
 }
 
 int cmutils_gzip(const char *src_file, const char *out_file)
@@ -1118,7 +1129,7 @@ void* cmutils_memdup(void *(*allocator)(size_t sz), const void *mem, int len, in
         return NULL;
     }
 
-    if (alloc == NULL)
+    if (allocator == NULL)
     {
         allocator = malloc;
     }
@@ -1161,16 +1172,16 @@ static const char* cmutils_basename(const char *path)
 
 static void cmutils_chopbasename(char *io_path)
 {
-    if (path != NULL)
+    if (io_path != NULL)
     {
-        size_t len = strlen(path);
+        size_t len = strlen(io_path);
 
-        while ((len > 0) && (path[len - 1] != '/'))
+        while ((len > 0) && (io_path[len - 1] != '/'))
         {
             --len;
         }
 
-        path[len] = '\0';
+        io_path[len] = '\0';
     }
 }
 
