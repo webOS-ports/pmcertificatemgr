@@ -899,7 +899,11 @@ int cmutils_mkdirp(const char *path)
 
     /* Actually make the dir if the last segments wern't evil
      * and it doesn't exists yet */
-    if (stat(path_cpy, &statbuf) == -1)
+    if (stat(path_cpy, &statbuf) == 0)
+    {
+        rc = 0;
+    }
+    else
     {
         rc = mkdir(path_cpy, 0777);
     }

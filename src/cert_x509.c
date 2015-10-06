@@ -109,7 +109,7 @@ CertReturnCode CertX509ReadStrProperty(const X509 *cert, X509Properties property
 
                 /* Append the entry value to the output buffer */
                 result = cmutils_strdsvcat(o_buf, len, (const char *)X509_NAME_ENTRY_get_data(entry), ',');
-            } while (result == CERT_OK)
+            } while (result == CERT_OK);
 
             return result;
         }
