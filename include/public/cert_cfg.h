@@ -28,6 +28,8 @@
 #ifndef __CERT_CFG_H__
 #define __CERT_CFG_H__
 
+#include "cert_mgr.h"
+
 /**
  * Defines the CertCfgProperty properties and their configuration strings
  */
