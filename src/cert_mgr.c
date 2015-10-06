@@ -39,14 +39,6 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
-#include <fcntl.h>
-#include <libgen.h>
-#include <glib.h>
-
-//#include <stdint.h>
-
-#include <dirent.h>
-#include <assert.h>
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -57,164 +49,82 @@
 #include <openssl/conf.h>
 #include <openssl/ec.h>
 
-#include "cert_mgr.h"
-#include "cert_mgr_prv.h"
 #include "cert_cfg.h"
 #include "cert_utils.h"
 #include "cert_db.h"
-
 #include "cert_x509.h"
 #include "cert_debug.h"
+#include "cert_mgr_prv.h"
 
-#ifndef false
-#define false 0
-#endif
-#ifndef true
-#define true 1
+#ifdef __cplusplus
+extern "C" {
 #endif
 
-#define CERT_UNDEFINED_FILE      CERT_MAX_FILE_EXTENSIONS
-
-
-const char *ext_a[CERT_MAX_FILE_EXTENSIONS] = { "UNKNOWN", "pem", "p12", "pfx",
-		"der", "crt", "cer", "crl" };
-
-
-
-#define CERT_NULL_PARAMETER_CHECK(A)
-
-typedef struct CertIterPriv {
-	DIR* dir;
-} _cert_IterPriv;
-
-#ifdef D_DEBUG_ENABLED
-static void logSSLErrors( void );
-#else
-# define logSSLErrors()
-#endif
-
-int Mkdir(const char *path)
+CertReturnCode SetupCertMgrEnviroment(void)
 {
-    struct stat statbuf;
-    int rc;
-    const char *parent = dirname(strdup(path));
+    CertReturnCode result;
+    char cert_path[MAX_CERT_PATH];
+    char db_name[MAX_CERT_PATH];
 
-    if (NULL == parent) {
-        return -1;
-    }
-    else {
-        //do not make a directory if it exists
-        rc = stat(path,&statbuf);
-        if (rc == 0) {
-            //directory exists
-            free((void*)parent);
-            return 0;
-        }
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, db_name, sizeof(db_name));
 
-        rc = stat(parent,&statbuf);
-        if (rc == -1) {
-            if (errno == ENOENT && path != NULL) {
-                // parent is missing, make it
-                rc = Mkdir(parent);
-            }
-            else {
-                free((void*)parent);
-                return rc; // fail
-            }
-        }
-        // actually make the dir
-        rc = mkdir(path,0777);
-        free((void*)parent);
-        return rc;
+    if (result != CERT_OK)
+    {
+        return result;
     }
+
+    DPRRINTF("%s: path %s\n", __FUNCTION__, db_name);
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DIR, cert_path, sizeof(cert_path));
+
+    if ((result != CERT_OK) || (cert_path[0] == '\0'))
+    {
+        DPRRINTF("CertInitCertMgr unable to read cert path");
+        strcpy(cert_path, "/var/ssl/certs");
+    }
+
+    if (cmutils_mkdirp(cert_path) != 0)
+    {
+        DPRRINTF("ERROR making dir '%s'\n", cert_path);
+        return CERT_DIRECTORY_CREATION_FAILED;
+    }
+
+    if (cmutils_touchp(db_name, NULL) != 0)
+    {
+        DPRINTF("ERROR touching '%s'\n", db_name);
+        return CERT_OPEN_FILE_FAILED;
+    }
+
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_SERIAL_NAME, cert_path, sizeof(cert_path));
+
+    if ((result != CERT_OK) || (cert_path[0] == '\0'))
+    {
+        DPRRINTF("CertInitCertMgr unable to read serial path");
+        strcpy(cert_path, "/var/ssl/serial");
+    }
+
+    if (cmutils_touchp(cert_path, "01\n"))
+    {
+        DPRRINTF("ERROR writing '%s'\n", cert_path);
+        return CERT_OPEN_FILE_FAILED;
+    }
+
+    result = CertCfgGetObjectStrValue(CERTCFG_PRIVATE_KEY_DIR, cert_path, sizeof(cert_path));
+
+    if ((result != CERT_OK) || (cert_path[0] == '\0'))
+    {
+        DPRRINTF("CertInitCertMgr unable to read private key path");
+        strcpy(cert_path, "/var/ssl/private");
+    }
+
+    if (cmutils_mkdirp(cert_path) != 0)
+    {
+        DPRRINTF("ERROR creating dir '%s'\n", cert_path);
+        return CERT_DIRECTORY_CREATION_FAILED;
+    }
+
+    return CERT_OK;
 }
 
-int Touch(const char *path, const char* data)
-{
-    int fd, rc;
-
-    // make sure the parent dir exists:
-    const char *parent = dirname(strdup(path));
-    rc = Mkdir(parent);
-    if (rc != 0)
-	return rc;
-
-    fd = open(path,O_CREAT|O_WRONLY,0777);
-    if (fd < 0 ) {
-	return -1;
-    }
-    else {
-	if (data) {
-	    write(fd,data,strlen(data));
-	}
-	close(fd);
-        return 0;
-    }
-}
-
-CertReturnCode_t SetupCertMgrEnviroment() {
-	int32_t result = CERT_OK;
-	char dbName[MAX_CERT_PATH];
-//	FILE *ifp;
-//	const char *mode = "r";
-
-	result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, dbName,
-			MAX_CERT_PATH);
-	fprintf(stdout, "%s: path %s\n", __FUNCTION__, dbName);
-
-//	if (CERT_OK != result) {
-//		result = CERT_DATABASE_NOT_AVAILABLE;
-//	} else {
-//		ifp = fopen(dbName, mode);
-//		if (ifp == NULL) {
-			char certPath[64];
-			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_CERT_DIR, certPath, 64)))
-					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read cert path");
-				strcpy(certPath, "/var/ssl/certs");
-			}
-
-			if (Mkdir(certPath) != 0) {
-				fprintf(stderr, "ERROR making dir '%s'\n", certPath);
-			}
-
-			if ( Touch(dbName,NULL) != 0) {
-				fprintf(stderr, "ERROR touching '%s'\n", dbName);
-			}
-
-			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_CERT_SERIAL_NAME, certPath, 64)))
-					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read cert path");
-				strcpy(certPath, "/var/ssl/serial");
-			}
-
-			//sprintf(command, "echo \'01\' > %s", certPath);
-			//fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (Touch(certPath,"01\n")) {
-				fprintf(stderr, "ERROR writing '%s'\n", certPath);
-			}
-
-			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_PRIVATE_KEY_DIR, certPath, 64)))
-					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read private key path");
-				strcpy(certPath, "/var/ssl/private");
-			}
-
-			if (Mkdir(certPath) != 0) {
-				fprintf(stderr, "ERROR creating dir '%s'\n", certPath);
-			}
-
-			result = CERT_OK;
-//		} else {
-//			fclose(ifp);
-//		}
-//	}
-
-	return result;
-}
 /*--***********************************************************************--*/
 /*                                                                           */
 /* FUNCTION: CertInitCertMgr                                                 */
@@ -249,7 +159,7 @@ CertReturnCode_t SetupCertMgrEnviroment() {
  *    variable OPENSSL_CONF and the system default CERT_DEF_CONF_FILE, in
  *    that order.
  *
- * @param[in] configFile the configuration file
+ * @param[in] config_file the configuration file
  *
  * @return CERT_OK: The database was successfully read and deciphered
  * @return CERT_PATH_LIMIT_EXCEEDED: The path string is too long
@@ -261,57 +171,51 @@ CertReturnCode_t SetupCertMgrEnviroment() {
  *
  */
 
-CertReturnCode_t CertInitCertMgr(const char *configFile)
+CertReturnCode CertInitCertMgr(const char *config_file)
 {
-    static int32_t sInited = 0;
-    int32_t result = CERT_OK;
-    char *configName = 0; //= (char *)configFile;
+    static int is_initialized = 0;
 
-    if (!sInited) {
-	sInited = 1;
+    if (!is_initialized)
+    {
+        CertReturnCode result;
+        char db_name[MAX_CERT_PATH];
 
-	if (NULL == configName) {
-	    configName = getenv("OPENSSL_CONFIG_NAME");
-	}
-	result = CertCfgOpenConfigFile(configFile, configName);
+        result = CertCfgOpenConfigFile(config_file, getenv("OPENSSL_CONFIG_NAME"));
 
-	if(result == CERT_UNDEFINED_ROOT_DIR) {
-	    SetupCertMgrEnviroment();
-	    result = CERT_OK;
-	}
+        if (result == CERT_UNDEFINED_ROOT_DIR)
+        {
+            result = SetupCertMgrEnviroment();
+        }
 
-	if (CERT_OK == result) {
-	    char rootPath[64];
-	    if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-		CERTCFG_ROOT_DIR, rootPath, 64))) || (!strlen(rootPath))) {
-		g_strlcpy(rootPath, ".", sizeof(rootPath));
-	    }
-	    if (CERT_OK != (result = CertInitLockFiles(rootPath))) {
-		perror("CertInitCertMgr");
-		result = CERT_LOCK_FILE_CREATION_FAILURE;
-		sInited = 0;
-	    } else {
-		char dbName[MAX_CERT_PATH];
+        if (result != CERT_OK)
+        {
+            return result;
+        }
 
-		result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
-			dbName, MAX_CERT_PATH);
-		if (CERT_OK != result) {
-		    result = CERT_DATABASE_NOT_AVAILABLE;
-		} else if (CERT_OK != (result = CertInitDatabase(dbName))) {
-		    result = CERT_DATABASE_NOT_AVAILABLE;
-		}
-		ERR_load_crypto_strings();
-		ERR_load_PKCS12_strings();
-		OpenSSL_add_all_algorithms();
+        if (CertInitLockFiles() != CERT_OK)
+        {
+            DPRRINTF("CertInitCertMgr: CertInitLockFiles");
+            return CERT_LOCK_FILE_CREATION_FAILURE;
+        }
 
-		seed_prng();
-	    }
-	}
+        if ((CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, db_name, sizeof(db_name)) != CERT_OK) ||
+            (CertInitDatabase(db_name) != CERT_OK))
+        {
+            return CERT_DATABASE_NOT_AVAILABLE;
+        }
+
+        OpenSSL_add_all_algorithms();
+
+        if (seedSSLPrng() != CERT_OK)
+        {
+            return CERT_GENERAL_FAILURE;
+        }
+
+        is_initialized = 1;
     }
-    return result;
+
+    return CERT_OK;
 }
-
-
 
 /*--***********************************************************************--*/
 /*                                                                           */
@@ -356,26 +260,17 @@ CertReturnCode_t CertInitCertMgr(const char *configFile)
  * @return CERT_UNDEFINED_DESTINATION if the certificate root dir not available
  *
  */
-CertReturnCode_t CertResetConfig(const char *pConfigFile) {
-	char configName[MAX_CERT_PATH];
-	CertReturnCode_t rValue;
+CertReturnCode CertResetConfig(const char *config_file)
+{
+    char config_name[MAX_CERT_PATH];
 
-	// check to see if it's already set
-	rValue = CertCfgGetObjectStrValue(CERTCFG_CONFIG_NAME, configName,
-			MAX_CERT_PATH);
+    if (CertCfgGetObjectStrValue(CERTCFG_CONFIG_NAME, config_name, sizeof(config_name)) == CERT_OK)
+    {
+        return CertCfgOpenConfigFile(config_file, config_name)
+    }
 
-	if (CERT_OK == rValue) {
-		rValue = CertCfgOpenConfigFile(pConfigFile, configName);
-	} else {
-		char *name;
-
-		// check if it's set in the environment
-		if (NULL == (name = getenv("OPENSSL_CONFIG_NAME")))
-			rValue = CertCfgOpenConfigFile(pConfigFile, name);
-		else
-			rValue = CertCfgOpenConfigFile(pConfigFile, NULL);
-	}
-	return rValue;
+    /* Load it from the environment */
+    return CertCfgOpenConfigFile(config_file, getenv("OPENSSL_CONFIG_NAME"));
 }
 
 /*--***********************************************************************--*/
@@ -385,12 +280,12 @@ CertReturnCode_t CertResetConfig(const char *pConfigFile) {
 /*       parts to the designated.  Decrypt if necessary.  The password,      */
 /*       passwd  is in clear text.                                           */
 /* INPUT:                                                                    */
-/*       pPkgPath: The name of the package file                              */
-/*       pDestPath: The path to the package file                             */
+/*       pkg_path: The name of the package file                              */
+/*       dst_path: The path to the package file                              */
 /*       pcbk: The callback function for encrypting the package              */
 /*       pwd_ctxt: The passkey in clear text for decrypting the package      */
 /* OUTPUT:                                                                   */
-/*       serialNb: An identifying number for the certificate                 */
+/*       sn: An identifying number for the certificate                       */
 /* RETURN:                                                                   */
 /*       CERT_OK:                                                            */
 /*       CERT_SERIAL_NUMBER_FILE_UNAVAILABLE: The Certificate Manager is not */
@@ -435,11 +330,11 @@ CertReturnCode_t CertResetConfig(const char *pConfigFile) {
  *       passwd  is in clear text.
  *
  *
- * @param[in] pPkgPath The name of the package file.
- * @param[in] pDestPath The path to the package file
+ * @param[in] pkg_path The name of the package file.
+ * @param[in] dst_path The path to the package file
  * @param[in] pcbk The callback function for encrypting the package
  * @param[in] pwd_ctxt The passkey in clear text for decrypting the package
- * @param[out] serialNb An identifying number for the certificate
+ * @param[out] sn An identifying number for the certificate
  *
  * @return CERT_OK
  * @return CERT_SERIAL_NUMBER_FILE_UNAVAILABLE: The Certificate Manager is not
@@ -460,43 +355,37 @@ CertReturnCode_t CertResetConfig(const char *pConfigFile) {
  *           perhaps a password problem
  *
  */
-CertReturnCode_t CertReadKeyPackageDirect(const char *pPkgPath,
-		const char *pDestPath, CertPassCallback pcbk, void *pwd_ctxt,
-		int32_t *serialNb)
+CertReturnCode CertReadKeyPackageDirect(const char *pkg_path, const char *dst_path, CertPassCallback pcbk, void *pwd_ctxt, int *sn)
 {
-    CertReturnCode_t result = CERT_GENERAL_FAILURE;
-    int32_t ctype __attribute__((unused));
+    switch (getFileType(pkg_path))
+    {
+    case CERT_PFX_FILE:
+    case CERT_P12_FILE:
+        DPRRINTF("%s crt p12 file \n", __FUNCTION__);
+        return p12ToFile(pkg_path, dst_path, pcbk, pwd_ctxt, sn);
 
-    switch (returnFileType(pPkgPath)) {
-	case CERT_PFX_FILE:
-	case CERT_P12_FILE:
-	    fprintf(stdout, "%s crt p12 file \n", __FUNCTION__);
-	    result = p12ToFile(pPkgPath, pDestPath, pcbk, pwd_ctxt, serialNb);
-	    ctype = CERTTYPE_P12;
-	    break;
+    case CERT_DER_FILE:
+    case CERT_CER_FILE:
+    case CERT_CRT_FILE:
+    case CERT_PEM_FILE:
+    case CERT_CRL_FILE:
+        if (pemToFile(pkg_path, dst_path, pcbk, pwd_ctxt, sn) == CERT_OK)
+        {
+            PRINTF("%s crt pem file \n", __FUNCTION__);
+            return CERT_OK;
+        }
 
-	case CERT_DER_FILE:
-	case CERT_CER_FILE:
-	case CERT_CRT_FILE:
-	case CERT_PEM_FILE:
-	case CERT_CRL_FILE:
-	    if((result = pemToFile(pPkgPath, pDestPath, pcbk, pwd_ctxt, serialNb)) == CERT_OK) {
-		fprintf(stdout, "%s crt pem file \n", __FUNCTION__);
-		ctype = CERTTYPE_PEM;
-	    } else {
-		if((result = derToFile(pPkgPath, pDestPath, serialNb)) == CERT_OK) {
-		    fprintf(stdout, "%s crt der file \n", __FUNCTION__);
-		    ctype = CERTTYPE_DER;
-		}
-	    }
-	    break;
+        if (derToFile(pkg_path, dst_path, sn) == CERT_OK)
+        {
+            DPRINTF("%s crt der file \n", __FUNCTION__);
+            return CERT_OK;
+        }
 
-	default:
-	    result = CERT_ILLEGAL_KEY_PACKAGE_TYPE;
-	    break;
+        return CERT_GENERAL_FAILURE;
+
+    default:
+        return CERT_ILLEGAL_KEY_PACKAGE_TYPE;
     }
-
-    return result;
 }
 
 /*--***********************************************************************--*/
@@ -506,12 +395,12 @@ CertReturnCode_t CertReadKeyPackageDirect(const char *pPkgPath,
 /*       destination directory.  Decrypt if necessary.  The password, passwd */
 /*       is in clear text.                                                   */
 /* INPUT:                                                                    */
-/*       pPkgPath: The location of the package file                          */
-/*       pDestPath: The root directory for the resolved, decrypted data      */
+/*       pkg_path: The location of the package file                          */
+/*       dst_path: The root directory for the resolved, decrypted data       */
 /*       pcbk: The callback function for decrypting the package              */
 /*       pwd_ctxt: The passkey in clear text for decrypting the package      */
 /* OUTPUT:                                                                   */
-/*       serialNb: The certificate ID number                                 */
+/*       sn: The certificate ID number                                       */
 /* RETURN:                                                                   */
 /*       CERT_OK:                                                            */
 /*       CERT_ILLEGAL_PACKAGE_TYPE: The package is not a supported type      */
@@ -569,11 +458,11 @@ CertReturnCode_t CertReadKeyPackageDirect(const char *pPkgPath,
  *          directory denoted by CERTCFG_PACKAGE_DIR.
  *
  *
- * @param[in] pPkgPath The name of the package file.
- * @param[in] pDestPath The path to the package file
+ * @param[in] pkg_path The name of the package file.
+ * @param[in] dst_path The path to the package file
  * @param[in] pcbk The callback function for encrypting the package
  * @param[in] pwd_ctxt The passkey in clear text for decrypting the package
- * @param[out] serialNb An identifying number for the certificate
+ * @param[out] sn An identifying number for the certificate
  *
  * @return CERT_OK
  * @return CERT_SERIAL_NUMBER_FILE_UNAVAILABLE: The Certificate Manager is not
@@ -595,43 +484,37 @@ CertReturnCode_t CertReadKeyPackageDirect(const char *pPkgPath,
  *
  */
 
-CertReturnCode_t CertInstallKeyPackageDirect(const char *pPkgPath,
-		const char *pDestPath, CertPassCallback pcbk, void *pwd_ctxt,
-		int32_t *serialNb)
+CertReturnCode CertInstallKeyPackageDirect(const char *pkg_path, const char *dst_path, CertPassCallback pcbk, void *pwd_ctxt, int *sn)
 {
-    CertReturnCode_t result = CERT_GENERAL_FAILURE;
-    int32_t ctype __attribute__((unused));
+    switch (getFileType(pkg_path))
+    {
+    case CERT_PFX_FILE:
+    case CERT_P12_FILE:
+        DPRRINTF("%s p12 pfx file\n", __FUNCTION__);
+        return p12ToFile(pkg_path, dst_path, pcbk, pwd_ctxt, sn);
 
-    switch (returnFileType(pPkgPath)) {
-	case CERT_PFX_FILE:
-	case CERT_P12_FILE:
-	    fprintf(stdout, "%s p12 pfx file\n", __FUNCTION__);
-	    result = p12ToFile(pPkgPath, pDestPath, pcbk, pwd_ctxt, serialNb);
-	    ctype = CERTTYPE_P12;
-	    break;
+    case CERT_DER_FILE:
+    case CERT_CER_FILE:
+    case CERT_CRT_FILE:
+    case CERT_PEM_FILE:
+    case CERT_CRL_FILE:
+        if (pemToFile(pkg_path, dst_path, pcbk, pwd_ctxt, sn) == CERT_OK)
+        {
+            DPRRINTF("%s crt pem file \n", __FUNCTION__);
+            return CERT_OK;
+        }
 
-	case CERT_DER_FILE:
-	case CERT_CER_FILE:
-	case CERT_CRT_FILE:
-	case CERT_PEM_FILE:
-	case CERT_CRL_FILE:
-	    if((result = pemToFile(pPkgPath, pDestPath, pcbk, pwd_ctxt, serialNb)) == CERT_OK) {
-		fprintf(stdout, "%s crt pem file \n", __FUNCTION__);
-		ctype = CERTTYPE_PEM;
-	    } else {
-		if((result = derToFile(pPkgPath, pDestPath, serialNb)) == CERT_OK) {
-		    fprintf(stdout, "%s crt der file \n", __FUNCTION__);
-		    ctype = CERTTYPE_DER;
-		}
-	    }
-	    break;
+        if (derToFile(pkg_path, dst_path, sn) == CERT_OK)
+        {
+            DPRRINTF("%s crt der file \n", __FUNCTION__);
+            return CERT_OK;
+        }
 
-	default:
-	    result = CERT_ILLEGAL_KEY_PACKAGE_TYPE;
-	    break;
+        return CERT_GENERAL_FAILURE;
+
+    default:
+        return CERT_ILLEGAL_KEY_PACKAGE_TYPE;
     }
-
-    return result;
 }
 
 /*--***********************************************************************--*/
@@ -704,7 +587,7 @@ CertReturnCode_t CertInstallKeyPackageDirect(const char *pPkgPath,
  * @param[in] pDestPath The path to the package file
  * @param[in] pcbk The callback function for encrypting the package
  * @param[in] pwd_ctxt The passkey in clear text for decrypting the package
- * @param[out] serialNb An identifying number for the certificate
+ * @param[out] sn An identifying number for the certificate
  *
  * @return CERT_OK
  * @return CERT_SERIAL_NUMBER_FILE_UNAVAILABLE: The Certificate Manager is not
@@ -726,24 +609,24 @@ CertReturnCode_t CertInstallKeyPackageDirect(const char *pPkgPath,
  *
  */
 
-CertReturnCode_t CertInstallKeyPackage(const char *pPkgPath,
-		CertPassCallback pcbk, void *pwd_ctxt, int32_t *serialNb)
+CertReturnCode CertInstallKeyPackage(const char *pkg_path, CertPassCallback pcbk, void *pwd_ctxt, int *sn)
 {
-    char pDestPath[MAX_CERT_PATH];
-    memset(pDestPath, 0, MAX_CERT_PATH);
-    CertReturnCode_t result;
+    char dst_path[MAX_CERT_PATH];
+    CertReturnCode result;
 
-    result = CertCfgGetObjectStrValue(CERTCFG_ROOT_DIR, pDestPath,
-	    MAX_CERT_PATH);
+    result = CertCfgGetObjectStrValue(CERTCFG_ROOT_DIR, dst_path, sizeof(dst_path));
 
-    if (CERT_OK != result)
-	return result;
+    if (result != CERT_OK)
+    {
+        return result;
+    }
 
-    if (0 == strlen(pDestPath))
-	return CERT_UNDEFINED_DESTINATION;
-    else
-	return CertInstallKeyPackageDirect(pPkgPath, pDestPath, pcbk, pwd_ctxt,
-		serialNb);
+    if (dst_path[0] == '\0')
+    {
+        return CERT_UNDEFINED_DESTINATION;
+    }
+
+    return CertInstallKeyPackageDirect(pkg_path, pDestPath, pcbk, pwd_ctxt, sn);
 }
 
 /*--***********************************************************************--*/
@@ -751,8 +634,8 @@ CertReturnCode_t CertInstallKeyPackage(const char *pPkgPath,
 /* FUNCTION: CertRemoveCertificateDirect                                     */
 /*       Remove a certificate from the designated directory                  */
 /* INPUT:                                                                    */
-/*       serialNb: The certificate ID.                                       */
-/*       pCertPath The location of the certificate.                          */
+/*       sn: The certificate ID.                                       */
+/*       cert_path The location of the certificate.                          */
 /* OUTPUT:                                                                   */
 /* RETURN:                                                                   */
 /*       CERT_OK                                                             */
@@ -761,7 +644,7 @@ CertReturnCode_t CertInstallKeyPackage(const char *pPkgPath,
 /*           name exceeds the pre-defined limits                             */
 /*       CERT_LINK_ERROR: The certificate removal failed.                    */
 /* NOTES:                                                                    */
-/*       1) removeFromPath will do the error checking on both pCertName and  */
+/*       1) removeCert will do the error checking on both pCertName and  */
 /*          *CertPath                                                        */
 /*                                                                           */
 /*--***********************************************************************--*/
@@ -770,8 +653,8 @@ CertReturnCode_t CertInstallKeyPackage(const char *pPkgPath,
  *
  * @brief Remove a certificate from the designated directory
  *
- * @param[in] serialNb The certificate ID.
- * @param[in] pCertPath The location of the certificate.
+ * @param[in] sn The certificate ID.
+ * @param[in] cert_path The location of the certificate.
  *
  * @return CERT_OK
  * CERT_UNDEFINED_DESTINATION: The path isn't defined
@@ -779,39 +662,10 @@ CertReturnCode_t CertInstallKeyPackage(const char *pPkgPath,
  *     exceeds the pre-defined limits
  * CERT_LINK_ERROR: The certificate removal failed.
  */
-CertReturnCode_t CertRemoveCertificateDirect(int32_t serialNb,
-		const char *pCertPath)
+CertReturnCode CertRemoveCertificateDirect(int sn, const char *cert_path)
 {
-    int errorNb;
-    CertReturnCode_t result = 0;
-
-    result = removeFromPath(serialNb, pCertPath, "", "pem", &errorNb);
-
-    return result;
-} /*--** CertRemoveCertificate **--*/
-
-
-CertReturnCode_t removeLinkFiles() {
-	CertReturnCode_t result = 0;
-	char certPath[64] = {'\0'};
-	gchar* command = NULL;
-
-	if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-			CERTCFG_CERT_DIR, certPath, 64)))
-			|| (!strlen(certPath))) {
-		perror("CertInitCertMgr unable to read cert path");
-		strcpy(certPath, "/var/ssl/certs");
-	}
-
-	command = g_strdup_printf( "rm -f `for f in $(find %s -type l); do if [ ! -e \"$f\" ]; then echo $f; fi; done`",certPath);
-	fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-	if (-1 == system(command)) {
-		fprintf(stderr, "ERROR removing links\n");
-	}
-	g_free(command);
-	// XXX also remove links from cache dir
-
-	return result;
+    int err_code;
+    return removeCert(sn, cert_path, "", "pem", &err_code);
 }
 
 /*--***********************************************************************--*/
@@ -819,7 +673,7 @@ CertReturnCode_t removeLinkFiles() {
 /* FUNCTION: CertRemoveCertificate                                           */
 /*       Remove a certificate from the default directory                     */
 /* INPUT:                                                                    */
-/*       serialNb: the certificate to be removed                             */
+/*       sn: the certificate to be removed                             */
 /* OUTPUT:                                                                   */
 /* RETURN:                                                                   */
 /*       CERT_OK                                                             */
@@ -836,8 +690,7 @@ CertReturnCode_t removeLinkFiles() {
  *
  * @brief Remove a certificate from the default directory
  *
- * @param[in] serialNb The certificate ID.
- * @param[in] pCertPath The location of the certificate.
+ * @param[in] sn The certificate ID.
  *
  * @return CERT_OK
  * CERT_UNDEFINED_DESTINATION: The path isn't defined
@@ -845,62 +698,63 @@ CertReturnCode_t removeLinkFiles() {
  *     exceeds the pre-defined limits
  * CERT_LINK_ERROR: The certificate removal failed.
  */
-CertReturnCode_t CertRemoveCertificate(int32_t serialNb) {
-	char pPath[MAX_CERT_PATH];
-	int errorNb;
-	CertReturnCode_t result = CERT_GENERAL_FAILURE;
+CertReturnCode CertRemoveCertificate(int sn)
+{
+    static const struct
+    {
+        CertCfgProperty dir;
+        const char *fprefix;
+        const char *fext;
+    } cert_dirs[] =
+    {
+        { CERTCFG_CERT_DIR, "", "pem" },
+        { CERTCFG_CERT_DIR, "ca", "pem" },
+        { CERTCFG_PRIVATE_KEY_DIR, "rsa", "pem" },
+        { CERTCFG_PRIVATE_KEY_DIR, "dsa", "pem" },
+        { CERTCFG_AUTH_CERT_DIR, "", "pem" },
+        { CERTCFG_PUBLIC_KEY_DIR, "rsa", "pem" },
+        { CERTCFG_PUBLIC_KEY_DIR, "dsa", "pem" },
+        { CERTCFG_CRL_DIR, "crl", "pem.gz" }
+    };
+    int err_code, iter_dir;
+    CertReturnCode result;
+    char cert_path[MAX_CERT_PATH];
 
-	/* Get one after another */
+    /* Get one after another */
+    for (iter_dir = 0; iter_dir < sizeof(cert_dirs) / sizeof(cert_dirs[0]); ++iter_dir)
+    {
+        if ((CertCfgGetObjectStrValue(cert_dirs[iter_dir].dir, cert_path, sizeof(cert_path)) == CERT_OK) &&
+            (cert_path[0] != '\0'))
+        {
+            result = removeCert(sn, cert_path, cert_dirs[iter_dir].fprefix, cert_dirs[iter_dir].fext, &err_code);
 
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_CERT_DIR, pPath,
-			MAX_CERT_PATH))
-		result = removeFromPath(serialNb, pPath, "", "pem", &errorNb);
+            if (result != CERT_OK)
+            {
+                break;
+            }
+        }
+    }
 
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_CERT_DIR, pPath,
-			MAX_CERT_PATH))
-		result = removeFromPath(serialNb, pPath, "ca", "pem", &errorNb);
+    /* whether or not things went well */
+    removeBrokenLinkFiles();
 
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_PRIVATE_KEY_DIR, pPath,
-			MAX_CERT_PATH))
-		result = removeFromPath(serialNb, pPath, "rsa", "pem", &errorNb);
+    if (result != CERT_OK)
+    {
+        return result;
+    }
 
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_PRIVATE_KEY_DIR, pPath,
-			MAX_CERT_PATH))
-		result = removeFromPath(serialNb, pPath, "dsa", "pem", &errorNb);
-
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_AUTH_CERT_DIR, pPath,
-			MAX_CERT_PATH))
-		result = removeFromPath(serialNb, pPath, "", "pem", &errorNb);
-
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_PUBLIC_KEY_DIR, pPath,
-			MAX_CERT_PATH))
-		result = removeFromPath(serialNb, pPath, "rsa", "pem", &errorNb);
-
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_PUBLIC_KEY_DIR, pPath,
-			MAX_CERT_PATH))
-		result = removeFromPath(serialNb, pPath, "dsa", "pem", &errorNb);
-
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_CRL_DIR, pPath,
-			MAX_CERT_PATH))
-		result = removeFromPath(serialNb, pPath, "crl", "pem.gz", &errorNb);
-
-	/* result = removeLinkFiles(); */
-	/* whether or not things went well  */
-
-	result = CertUpdateDatabaseItem((char *)"ksa", serialNb,
-			CERT_DATABASE_ITEM_STATUS, "x");
-
-	return result;
+    return CertUpdateDatabaseItem(sn, CERT_DATABASE_ITEM_STATUS, CertGetStatusString(CERT_STATUS_ALL));
 }
+
 /*--***********************************************************************--*/
 /*                                                                           */
 /* FUNCTION: CertGetCertificateCountDirect                                   */
 /*       Retrieve the number of certificates based on status                 */
 /* INPUT:                                                                    */
-/*       pDatabase: The certificate database                                 */
+/*       db_path: The certificate database                                   */
 /*       status: The filter                                                  */
 /* OUTPUT:                                                                   */
-/*       pNCerts: The number of certificates that matched the status         */
+/*       o_ncerts: The number of certificates that matched the status         */
 /* RETURN:                                                                   */
 /*       CERT_OPEN_FILE_FAILED: The certificate directory couldn't be opened */
 /* NOTES:                                                                    */
@@ -912,9 +766,9 @@ CertReturnCode_t CertRemoveCertificate(int32_t serialNb) {
  *
  * Count the number of certificates that match the status.
  *
- * @param pDatabase The certificate database
+ * @param db_path The certificate database
  * @param status The filter
- * @param pNCerts The number of certificates that matched the status
+ * @param o_ncerts The number of certificates that matched the status
  *
  * @return CERT_OK
  * @return CERT_DATABASE_INITIALIZATION_ERROR: The database was never init'ed
@@ -922,14 +776,10 @@ CertReturnCode_t CertRemoveCertificate(int32_t serialNb) {
  * @return CERT_LOCKED_FILE_LOCKED: The database lockfile is unavailable
  * @return CERT_DATABASE_LOCKED: The database is currently in use
  */
-CertReturnCode_t CertGetCertificateCountDirect(char *pDatabase,
-		CertStatus_t status, int32_t *pNCerts) {
-	CertReturnCode_t result;
-
-	result = CertDatabaseCountCertsDirect(pDatabase, status, pNCerts);
-
-	return result;
-} /*--** CertGetCertificateCountDirect **--*/
+CertReturnCode CertGetCertificateCountDirect(const char *db_path, CertStatus status, int *o_ncerts)
+{
+    return CertDatabaseCountCertsDirect(db_path, status, o_ncerts);
+}
 
 /*--***********************************************************************--*/
 /*                                                                           */
@@ -938,7 +788,7 @@ CertReturnCode_t CertGetCertificateCountDirect(char *pDatabase,
 /* INPUT:                                                                    */
 /*       status: The filter                                                  */
 /* OUTPUT:                                                                   */
-/*       pNCerts: The number of certificates that matched the status         */
+/*       o_ncerts: The number of certificates that matched the status         */
 /* RETURN:                                                                   */
 /* NOTES:                                                                    */
 /*       1) There are no checks for database consistency                     */
@@ -951,9 +801,8 @@ CertReturnCode_t CertGetCertificateCountDirect(char *pDatabase,
  *
  * Count the number of certificates that match the status.
  *
- * @param pDatabase The certificate database
  * @param status The filter
- * @param pNCerts The number of certificates that matched the status
+ * @param o_ncerts The number of certificates that matched the status
  *
  * @return CERT_OK
  * @return CERT_DATABASE_INITIALIZATION_ERROR: The database was never init'ed
@@ -961,24 +810,24 @@ CertReturnCode_t CertGetCertificateCountDirect(char *pDatabase,
  * @return CERT_LOCKED_FILE_LOCKED: The database lockfile is unavailable
  * @return CERT_DATABASE_LOCKED: The database is currently in use
  */
-CertReturnCode_t CertGetCertificateCount(CertStatus_t status, int32_t *pNCerts) {
-	char path[MAX_CERT_PATH];
-	CertReturnCode_t result = CERT_GENERAL_FAILURE;
+CertReturnCode CertGetCertificateCount(CertStatus status, int *o_ncerts)
+{
+    char db_path[MAX_CERT_PATH];
 
-	if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, path,
-			MAX_CERT_PATH)) {
-		result = CertGetCertificateCountDirect(path, status, pNCerts);
-	}
+    if (CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, db_path, sizeof(db_path)) == CERT_OK)
+    {
+        return CertGetCertificateCountDirect(db_path, status, o_ncerts);
+    }
 
-	return result;
-} /*--** CertGetCertificateCount **--*/
+    return CERT_GENERAL_FAILURE;
+}
 
 /*--***********************************************************************--*/
 /*                                                                           */
 /* FUNCTION: certAddAuthorizedCertificate                                    */
 /*       Set a certificate to authorized                                     */
 /* INPUT:                                                                    */
-/*       serialNB: the serial number of the certificate file to be authorized*/
+/*       sn: the serial number of the certificate file to be authorized*/
 /* OUTPUT:                                                                   */
 /*       void                                                                */
 /* RETURN:                                                                   */
@@ -1009,12 +858,10 @@ CertReturnCode_t CertGetCertificateCount(CertStatus_t status, int32_t *pNCerts) 
 /*                                                                           */
 /*--***********************************************************************--*/
 
-CertReturnCode_t CertUpdateDatabase(void);
-
 /**
  * @brief Add a certificate to the list of valid certificates
  *
- * @param serialNb The certificate ID
+ * @param sn The certificate ID
  *
  * @return CERT_OK:
  * @return CERT_UNSUPPORTED_CERT_TYPE: the certificate package is not a
@@ -1024,78 +871,99 @@ CertReturnCode_t CertUpdateDatabase(void);
  * @return CERT_TOO_MANY_HASH_FILES: We've exceeded the number of files whose
  *      base name is the same.
  */
-CertReturnCode_t CertAddAuthorizedCert(const int32_t serialNb)
+CertReturnCode CertAddAuthorizedCert(const int sn)
 {
-    CertReturnCode_t result = CERT_GENERAL_FAILURE;
-    X509* cert = NULL;
-    char certPath[MAX_CERT_PATH];
-    char filename[MAX_CERT_PATH];
+    X509 *cert = NULL;
+    CertReturnCode result;
     unsigned long hash;
+    char cert_path[MAX_CERT_PATH];
+    char filename[MAX_CERT_PATH];
 
 #if 0
-    result = CertGetNameFromSerialNumber(serialNb, certPath, MAX_CERT_PATH);
+    result = CertGetNameFromSerialNumber(sn, cert_path, sizeof(cert_path));
 #else
-    result = makePathToCert(serialNb, certPath, MAX_CERT_PATH);
+    result = makeCertPathFromSerial(sn, cert_path, sizeof(cert_path));
 #endif
 
-    if (CERT_OK != result)
+    if (result != CERT_OK)
     {
-	return result;
+        return result;
     }
 
-    result = CertPemToX509(certPath, &cert);
-    if (CERT_OK != result)
+    result = CertPemToX509(cert_path, &cert);
+
+    if (result != CERT_OK)
     {
-	return result;
+        return result;
     }
 
-    if(cert) {
-	hash = X509_subject_name_hash(cert);
+    hash = X509_subject_name_hash(cert);
 
-	result = mkFileNameFromHash(filename, sizeof(filename), hash, certPath,			CERTCFG_AUTH_CERT_DIR);
-	if (CERT_OK == result) {
-		char dbPath[MAX_CERT_PATH];
+    result = getCertLinkPath(filename, sizeof(filename), hash, cert_path, CERTCFG_AUTH_CERT_DIR);
 
-		if (-1 == symlink(certPath, filename)) {
-			fprintf(stderr, "ERROR %d creating symlink '%s' -> '%s'\n",
-				errno, filename, certPath);
-		}
-		fprintf(stdout, "%s - %s - %s\n", __FUNCTION__, certPath, filename);
-		result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, dbPath,
-			MAX_CERT_PATH);
+    if (result != CERT_OK)
+    {
+        goto end;
+    }
 
-		if (CERT_OK != result) {
-			PRINT_RETURN_CODE(result);
-			fprintf(stdout, "Need to unwind this %s\n", __FUNCTION__);
-		} else {
-			result = CertUpdateDatabaseItem(dbPath, serialNb,
-			CERT_DATABASE_ITEM_STATUS,
-			statusNames[CERT_STATUS_VALID_CA]);
-		}
-	}
+    if (symlink(cert_path, filename) == -1)
+    {
+        DPRINTF("ERROR %d creating symlink '%s' -> '%s'\n", errno, filename, cert_path);
+        result = CERT_LINK_ERR;
+        goto end;
+    }
 
-	// ericm: also make a link in trusted cache dir that points to this cert
-	result = mkFileNameFromHash(filename, sizeof(filename), hash, certPath,			CERTCFG_TRUSTED_CA_DIR);
-	if (CERT_OK == result) {
+    DPRRINTF("%s - %s - %s\n", __FUNCTION__, cert_path, filename);
 
-		if (-1 == symlink(certPath, filename)) {
-			fprintf(stderr, "ERROR %d creating symlink '%s' -> '%s'\n",
-				errno, filename, certPath);
-		}
-		fprintf(stdout, "%s - %s - %s\n", __FUNCTION__, certPath, filename);
-		/* don't update db, it was done above */
-	}
-	X509_free(cert);
-   }
-   return result;
-} /* CertAddAuthorizedCert */
+    // ericm: also make a link in trusted cache dir that points to this cert
+    result = getCertLinkPath(filename, sizeof(filename), hash, cert_path, CERTCFG_TRUSTED_CA_DIR);
+
+    if (result != CERT_OK)
+    {
+        goto unlink_auth;
+    }
+
+    if (symlink(cert_path, filename) == -1)
+    {
+        DPRRINTF("ERROR %d creating symlink '%s' -> '%s'\n", errno, filename, cert_path);
+        result = CERT_LINK_ERR;
+        goto unlink_auth;
+    }
+
+    result = CertUpdateDatabaseItem(sn, CERT_DATABASE_ITEM_STATUS, CertGetStatusString(CERT_STATUS_VALID_CA));
+
+    if (result != CERT_OK)
+    {
+        goto unlink_trusted;
+    }
+
+    DPRINTF("%s - %s - %s\n", __FUNCTION__, cert_path, filename);
+    /* don't update db, it was done above */
+
+end:
+    X509_free(cert);
+
+    return result;
+
+error:
+unlink_trusted:
+    unlink(filename);
+
+unlink_auth:
+    if (getCertLinkPath(filename, sizeof(filename), hash, cert_path, CERTCFG_AUTH_CERT_DIR) == CERT_DUPLICATE)
+    {
+        unlink(filename);
+    }
+
+    goto end;
+}
 
 /*--***********************************************************************--*/
 /*                                                                           */
 /* FUNCTION: certAddTrustedCertificate                                    */
 /*       Set a certificate to trusted                                     */
 /* INPUT:                                                                    */
-/*       serialNB: the serial number of the certificate file to be authorized*/
+/*       sn: the serial number of the certificate file to be authorized*/
 /* OUTPUT:                                                                   */
 /*       void                                                                */
 /* RETURN:                                                                   */
@@ -1113,7 +981,7 @@ CertReturnCode_t CertAddAuthorizedCert(const int32_t serialNb)
 /**
  * @brief Add a certificate to the list of trusted certificates
  *
- * @param serialNb The certificate ID
+ * @param sn The certificate ID
  *
  * @return CERT_OK:
  * @return CERT_UNSUPPORTED_CERT_TYPE: the certificate package is not a
@@ -1124,55 +992,10 @@ CertReturnCode_t CertAddAuthorizedCert(const int32_t serialNb)
  *      base name is the same.
  */
 
-CertReturnCode_t CertAddTrustedCert(const int32_t serialNb) {
-	CertReturnCode_t result = CERT_GENERAL_FAILURE;
-#if 0
-	X509* cert = NULL;
-	char certPath[MAX_CERT_PATH];
-	char filename[MAX_CERT_PATH];
-	unsigned long hash;
-
-#if 0
-	result = CertGetNameFromSerialNumber(serialNb, certPath, MAX_CERT_PATH);
-#else
-	result = makePathToCert(serialNb, certPath, MAX_CERT_PATH);
-#endif
-
-	if (CERT_OK != result)
-		return result;
-
-	result = CertPemToX509(certPath, &cert);
-	if (CERT_OK != result)
-		return result;
-
-	hash = X509_subject_name_hash(cert);
-	result = mkFileNameFromHash(filename, sizeof(filename), hash,
-		certPath, CERTCFG_AUTH_CERT_DIR);
-	if (CERT_OK == result) {
-		char dbPath[MAX_CERT_PATH];
-
-		symlink(certPath, filename);
-#endif
-		char dbPath[MAX_CERT_PATH];
-		result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, dbPath,
-				MAX_CERT_PATH);
-
-		if (CERT_OK != result) {
-			PRINT_RETURN_CODE(result);
-			fprintf(stdout, "Need to unwind this %s\n", __FUNCTION__);
-		} else {
-			result = CertUpdateDatabaseItem(dbPath, serialNb,
-					CERT_DATABASE_ITEM_STATUS,
-					statusNames[CERT_STATUS_TRUSTED_PEER]);
-		}
-#if 0
-	}
-
-	X509_free(cert);
-#endif
-
-	return result;
-} /* CertAddTrustedCert */
+CertReturnCode CertAddTrustedCert(const int sn)
+{
+    return CertUpdateDatabaseItem(sn, CERT_DATABASE_ITEM_STATUS, CertGetStatusString(CERT_STATUS_TRUSTED_PEER));
+}
 
 
 /*--***********************************************************************--*/
@@ -1182,7 +1005,7 @@ CertReturnCode_t CertAddTrustedCert(const int32_t serialNb) {
 /* INPUT:                                                                    */
 /* OUTPUT:                                                                   */
 /* RETURN:                                                                   */
-/*       CERT_OPEN_FILE_FAILURE: the file associated with the serialNB could */
+/*       CERT_OPEN_FILE_FAILURE: the file associated with the sn could */
 /*            not be opened                                                  */
 /*       CERT_BUFFER_LIMIT_EXCEEDED: The path is too long for the default    */
 /*            buffer size.                                                   */
@@ -1201,9 +1024,9 @@ CertReturnCode_t CertAddTrustedCert(const int32_t serialNb) {
  *
  * @brief Check to see if the certificate is valid.
  *
- * @param serialNb The certificate ID to validate
+ * @param sn The certificate ID to validate
  *
- * @return CERT_OPEN_FILE_FAILURE: the file associated with the serialNB could
+ * @return CERT_OPEN_FILE_FAILURE: the file associated with the sn could
  *            not be opened
  * @return CERT_BUFFER_LIMIT_EXCEEDED: The path is too long for the default
  *            buffer size.
@@ -1214,32 +1037,39 @@ CertReturnCode_t CertAddTrustedCert(const int32_t serialNb) {
  * @return CERT_DATE_PENDING: The certificate is premature
  * @return CERT_DATABASE_LOCKED: The database could not be updated
  */
-CertReturnCode_t CertValidateCertificate(const int32_t serialNb) {
-	CertReturnCode_t result = CERT_GENERAL_FAILURE;
+CertReturnCode CertValidateCertificate(const int sn)
+{
+    int ctype;
+    CertMgrError err_code;
+    CertReturnCode result;
+    char path[MAX_CERT_PATH];
 
-	char dir[MAX_CERT_PATH];
-	int32_t cmErr;
+    result = makeCertPathFromSerial(sn, path, sizeof(path));
 
-	if (CERT_OK == (result = makePathToCert(serialNb, dir, MAX_CERT_PATH))) {
-		if (exists(dir)) {
-			int32_t i;
+    if (result != CERT_OK)
+    {
+        return result;
+    }
 
-			/* File formats are mutually exclusive in interpretation */
-			for (i = CERTTYPE_PEM; i < CERTTYPE_UNKNOWN; i++) {
-				result = validateCertPath(dir, serialNb, i, &cmErr);
-				/*
-				 * This test fails if the file is the wrong CERTTYPE
-				 * So go on the the next one
-				 */
-				if (CERT_FILE_READ_FAILURE != result)
-					break;
-			}
-		} else {
-			result = CERT_OPEN_FILE_FAILED;
-		}
-	}
+    if (!cmutils_exists(path))
+    {
+        return CERT_OPEN_FILE_FAILED;
+    }
 
-	return result;
+    /* File formats are mutually exclusive in interpretation */
+    for (ctype = CERTTYPE_PEM; ctype < CERTTYPE_UNKNOWN; ++ctype)
+    {
+        result = validateCertPath(path, sn, ctype, &err_code);
+
+        /* This test fails if the file is the wrong CERTTYPE
+         * So go on the the next one */
+        if (result != CERT_FILE_READ_FAILURE)
+        {
+            break;
+        }
+    }
+
+    return result;
 }
 
 /*--***********************************************************************--*/
@@ -1251,9 +1081,9 @@ CertReturnCode_t CertValidateCertificate(const int32_t serialNb) {
 /* FUNCTION: CertPemToX509                                                       */
 /*       Read a PEM encoded certificate into memory                          */
 /* INPUT:                                                                    */
-/*       pemPath: the path to the PEM encoded file                           */
+/*       pem_path: the path to the PEM encoded file                           */
 /* OUTPUT:                                                                   */
-/*       hCert: the X.509 certificate for use                                */
+/*       o_cert: the X.509 certificate for use                                */
 /* RETURN:                                                                   */
 /*       CERT_OK: the certificate had been read successfully                 */
 /*       CERT_OPEN_FILE_FAILURE: the bio file could not be opened            */
@@ -1262,41 +1092,112 @@ CertReturnCode_t CertValidateCertificate(const int32_t serialNb) {
 /*                                                                           */
 /*--***********************************************************************--*/
 
-CertReturnCode_t CertPemToX509(const char* pemPath, X509** hCert) {
-	CertReturnCode_t result = CERT_GENERAL_FAILURE;
-	X509* cert = NULL;
+CertReturnCode CertPemToX509(const char *pem_path, X509 **o_cert)
+{
+    BIO *bio;
+    X509 *cert;
+    char pass[] = "    ";
 
-	BIO* bio;
+    /* Don't dereference NULL pointers */
+    if ((pem_path == NULL) || (o_cert == NULL))
+    {
+        return CERT_INVALID_ARG;
+    }
 
-	if ((bio = BIO_new_file(pemPath, "r")) == NULL) {
-		result = CERT_OPEN_FILE_FAILED;
-		PRINT_RETURN_CODE(result);
-	} else {
-		char buffer[] = "    ";
+    bio = BIO_new_file(pem_path, "r");
 
-		cert = PEM_read_bio_X509(bio, NULL, NULL, buffer);
-		BIO_free(bio);
-		if (NULL != cert) {
-			result = CERT_OK;
-		} else {
-			result = CERT_FILE_READ_FAILURE;
-			PRINT_RETURN_CODE(result);logSSLErrors();
-		}
-	}
+    if (bio == NULL)
+    {
+        PRINT_RETURN_CODE(CERT_OPEN_FILE_FAILED);
+        return CERT_OPEN_FILE_FAILED;
+    }
 
-	*hCert = cert;
+    cert = PEM_read_bio_X509(bio, NULL, NULL, pass);
 
-	return result;
-} /* CertPemToX509 */
+    BIO_free(bio);
+
+    if (cert == NULL)
+    {
+        PRINT_RETURN_CODE(CERT_FILE_READ_FAILURE);
+        logSSLErrors();
+        return CERT_FILE_READ_FAILURE;
+    }
+
+    *o_cert = cert;
+
+    return CERT_OK;
+}
+
+CertReturnCode CertGetX509(const char *pkg_path, void *pass, X509 **o_cert)
+{
+    if (pkg_path == NULL)
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    if (o_cert == NULL)
+    {
+        return CERT_NULL_BUFFER;
+    }
+
+    switch (getFileType(pkg_path))
+    {
+    case CERT_PFX_FILE:
+    case CERT_P12_FILE:
+        {
+            EVP_PKEY *key;
+            STACK_OF(X509) *ca;
+            CertReturnCode result;
+
+            DPRINTF("%s p12 pfx file\n", __FUNCTION__);
+            result = p12ToX509(pkg_path, pass, o_cert, &key, &ca);
+
+            if (pkey != NULL)
+            {
+                EVP_PKEY_free(key);
+            }
+
+            if (ca != NULL)
+            {
+                sk_X509_free(ca);
+            }
+
+            return result;
+        }
+
+    case CERT_DER_FILE:
+    case CERT_CER_FILE:
+    case CERT_CRT_FILE:
+    case CERT_PEM_FILE:
+        if (CertPemToX509(pkg_path, o_cert) == CERT_OK)
+        {
+            DPRINTF("%s crt pem file \n", __FUNCTION__);
+            return CERT_OK;
+        }
+
+        if (derToX509(pkg_path, o_cert) == CERT_OK)
+        {
+            DPRINTF("%s crt der file \n", __FUNCTION__);
+            return CERT_OK;
+        }
+
+        return CERT_GENERAL_FAILURE;
+
+    default:
+        PRINT_ERROR4("Path", pkg_path, "FileType", (int)getFileType(pkg_path));
+        return CERT_ILLEGAL_KEY_PACKAGE_TYPE;
+    }
+}
+
 
 /*--***********************************************************************--*/
 /*                                                                           */
 /* FUNCTION: derToX509                                                       */
 /*       Read a DER encoded X.509 information into memory                    */
 /* INPUT:                                                                    */
-/*       derPath: the path to the DER encoded file                           */
+/*       der_path: the path to the DER encoded file                           */
 /* OUTPUT:                                                                   */
-/*       hCert: the X.509 certificate for use                                */
+/*       o_cert: the X.509 certificate for use                                */
 /* RETURN:                                                                   */
 /*       CERT_OK: the certificate had been read successfully                 */
 /*       CERT_FILE_ACCESS_FAILURE: the bio file opening failed               */
@@ -1305,192 +1206,122 @@ CertReturnCode_t CertPemToX509(const char* pemPath, X509** hCert) {
 /*                                                                           */
 /*--***********************************************************************--*/
 
-CertReturnCode_t derToX509(const char *derPath, X509 **hCert) {
-	CertReturnCode_t result = CERT_GENERAL_FAILURE;
-	X509 *cert = NULL;
-
-	FILE *file = fopen(derPath, "r");
-
-	if (NULL != file) {
-		cert = d2i_X509_fp(file, NULL);
-
-		if (NULL == cert) {
-			cert = X509_new();
-			rewind(file);
-
-			if (NULL == PEM_read_X509(file, &cert, NULL, NULL)) {
-				X509_free(cert);
-				cert = NULL;
-			}
-		}
-
-		fclose(file);
-
-		if (NULL != cert) {
-			*hCert = cert;
-			result = CERT_OK;
-		} else {
-			result = CERT_FILE_READ_FAILURE;
-			PRINT_RETURN_CODE(result);logSSLErrors();
-		}
-	} else {
-		result = CERT_FILE_ACCESS_FAILURE;
-		PRINT_RETURN_CODE(result);
-	}
-	return result;
-}
-
-CertReturnCode_t p12ToX509(const char *p12Path, void *pass, X509 **hCert,
-EVP_PKEY **pKey, STACK_OF(X509) **pCa)
+static CertReturnCode derToX509(const char *der_path, X509 **o_cert)
 {
+    X509 *cert;
+    FILE *file = fopen(der_path, "r");
 
-    CertReturnCode_t result = CERT_OK;
-    FILE *fp = fopen(p12Path, "r");
-
-    if (NULL != fp) {
-	PKCS12 *p12 = d2i_PKCS12_fp(fp, NULL);
-	fclose(fp);
-
-
-	if (NULL != p12) {
-	    EVP_PKEY *pkey = NULL;
-	    X509 *cert = NULL;
-	    STACK_OF(X509) *ca = NULL;
-
-	    if (PKCS12_verify_mac(p12, "", 0) || PKCS12_verify_mac(p12, NULL, 0)) {
-		fprintf(stdout, "%s no password \n", __FUNCTION__);
-	    } else {
-		fprintf(stdout, "%s password required \n", __FUNCTION__);
-		if (PKCS12_verify_mac(p12, pass, strlen(pass))) {
-		    fprintf(stdout, "%s password correct \n", __FUNCTION__);
-		} else {
-		    fprintf(stdout, "%s password incorrect %s\n", __FUNCTION__,
-			    (char*)pass);
-		    result = CERT_PASSWD_WRONG;
-		}
-	    }
-
-	    if (result == CERT_OK) {
-		if ( 0 != PKCS12_parse(p12, pass, &pkey, &cert, &ca)) {
-		    if (NULL != cert) {
-			//						if(**hCert != NULL)
-			*hCert = cert;
-			//						if(**hKey != NULL)
-			*pKey = pkey;
-			//						if(**hCa != NULL)
-			*pCa = ca;
-		    } else {
-			result = CERT_FILE_READ_FAILURE;
-			PRINT_RETURN_CODE(result);
-			logSSLErrors();
-		    }
-		} else {
-		    result = CERT_FILE_READ_FAILURE;
-		    PRINT_RETURN_CODE(result);
-		    logSSLErrors();
-		}
-	    }
-	} else {
-	    result = CERT_FILE_READ_FAILURE;
-	    PRINT_RETURN_CODE(result);
-	}
-    } else {
-	result = CERT_FILE_READ_FAILURE;
-	PRINT_RETURN_CODE(result);
+    if (file == NULL)
+    {
+        PRINT_RETURN_CODE(CERT_FILE_ACCESS_FAILURE);
+        return CERT_FILE_ACCESS_FAILURE;
     }
-    return result;
+
+    cert = d2i_X509_fp(file, NULL);
+
+    if (cert == NULL)
+    {
+        cert = X509_new();
+        rewind(file);
+
+        if (PEM_read_X509(file, &cert, NULL, NULL) == NULL)
+        {
+            X509_free(cert);
+            cert = NULL;
+        }
+    }
+
+    fclose(file);
+
+    if (cert == NULL)
+    {
+        PRINT_RETURN_CODE(CERT_FILE_READ_FAILURE);
+        logSSLErrors();
+        return CERT_FILE_READ_FAILURE;
+    }
+
+    *o_cert = cert;
+
+    return CERT_OK;
 }
 
-CertReturnCode_t CertGetX509(const char *pPkgPath, void *pass, X509 **hCert) {
+static CertReturnCode p12ToX509(const char *p12_path, void *pass, X509 **o_cert, EVP_PKEY **o_key, STACK_OF(X509) **o_ca)
+{
+    FILE *fp;
+    X509 *cert;
+    PKCS12 *p12;
+    EVP_PKEY *pkey;
+    STACK_OF(X509) *ca;
 
-	CertReturnCode_t result = CERT_GENERAL_FAILURE;
+    /* Don't derefrence NULL pointers */
+    if (p12_path == NULL)
+    {
+        return CERT_INVALID_ARG;
+    }
 
-	switch (returnFileType(pPkgPath)) {
-	case CERT_PFX_FILE:
-	case CERT_P12_FILE:
-	{
-		EVP_PKEY *pkey = NULL;
-		STACK_OF(X509) *ca = NULL;
+    /* Don't derefrence NULL pointers */
+    if ((o_cert == NULL) || (o_key == NULL) || (o_ca == NULL))
+    {
+        return CERT_NULL_BUFFER;
+    }
 
-		fprintf(stdout, "%s p12 pfx file\n", __FUNCTION__);
-		result = p12ToX509(pPkgPath, pass, hCert, &pkey, &ca);
+    fp = fopen(p12_path, "r");
 
-		if (pkey)
-			EVP_PKEY_free(pkey);
+    if (fp == NULL)
+    {
+        PRINT_RETURN_CODE(CERT_FILE_READ_FAILURE);
+        return CERT_FILE_READ_FAILURE;
+    }
 
-		if (ca)
-			sk_X509_free(ca);
+    p12 = d2i_PKCS12_fp(fp, NULL);
+    fclose(fp);
 
-		break;
-	}
-	case CERT_DER_FILE:
-	case CERT_CER_FILE:
-	case CERT_CRT_FILE:
-	case CERT_PEM_FILE:
-		if((result = CertPemToX509(pPkgPath, hCert)) == CERT_OK) {
-			fprintf(stdout, "%s crt pem file \n", __FUNCTION__);
-		} else {
-			if((result = derToX509(pPkgPath, hCert)) == CERT_OK) {
-				fprintf(stdout, "%s crt der file \n", __FUNCTION__);
-			}
-		}
-		break;
+    if (p12 == NULL)
+    {
+        PRINT_RETURN_CODE(CERT_FILE_READ_FAILURE);
+        return CERT_FILE_READ_FAILURE;
+    }
 
-//	case CERT_DER_FILE:
-//	case CERT_CER_FILE:
-//		result = derToX509(pPkgPath, hCert);
-//		break;
-//
-//	case CERT_CRT_FILE:
-//	case CERT_PEM_FILE:
-//		fprintf(stdout, "%s crt pem file \n", __FUNCTION__);
-//		result = CertPemToX509(pPkgPath, hCert);
-//		break;
+    /* Try to verify without passphrase */
+    if ((!PKCS12_verify_mac(p12, "", 0)) &&
+        (!PKCS12_verify_mac(p12, NULL, 0)))
+    {
+        DPRINTF("%s password required \n", __FUNCTION__);
 
-	default:
-		PRINT_ERROR4("Path", pPkgPath, "FileType", (int)returnFileType(pPkgPath));
-		result = CERT_ILLEGAL_KEY_PACKAGE_TYPE;
-		break;
-	}
+        if (!PKCS12_verify_mac(p12, pass, strlen(pass)))
+        {
+            DPRINTF("%s password incorrect %s\n", __FUNCTION__, (const char *)pass);
+            return CERT_PASSWD_WRONG;
+        }
+    }
 
-	return result;
+    if ((!PKCS12_parse(p12, pass, &pkey, &cert, &ca)) ||
+        (cert == NULL))
+    {
+        PRINT_RETURN_CODE(CERT_FILE_READ_FAILURE);
+        logSSLErrors();
+        return CERT_FILE_READ_FAILURE;
+    }
+
+    *o_cert = cert;
+    *o_key = pkey;
+    *o_ca = ca;
+
+    return CERT_OK;
 }
 
 /*--***********************************************************************--*/
 /*--**** FILE TO FILE                                              ********--*/
 /*--***********************************************************************--*/
-static CertReturnCode_t getNextSerialNumber(int32_t *serial) {
-	CertReturnCode_t rValue = CERT_GENERAL_FAILURE;
-	char serialFile[MAX_CERT_PATH] = {'\0'};
-	int32_t serialNb = 0;
-
-	/* lock the database              */
-	if (0 != (rValue = CertLockFile(CERT_FILELOCK_DATABASE))) {
-		return rValue;
-	}
-	/* Get the current serial number  */
-	if (CERT_OK == (rValue = CertCfgGetObjectStrValue(CERTCFG_CERT_SERIAL_NAME,
-			serialFile, MAX_CERT_PATH))) {
-		if (0 == (serialNb = CertGetSerialNumberInc(serialFile, 1))) {
-			rValue = CERT_SERIAL_NUMBER_UNAVAILABLE;
-		} else {
-			*serial = serialNb;
-		}
-	}
-	CertUnlockFile(CERT_FILELOCK_DATABASE);
-
-	return rValue;
-}
-
 /*--***********************************************************************--*/
 /*                                                                           */
 /* FUNCTION: p12ToFile                                                       */
 /*       Decrypt the PKCS#12 package and populate the given directory with   */
 /*       the results                                                         */
 /* INPUT:                                                                    */
-/*       pPkgPath: The location of the package file                          */
+/*       pkg_path: The location of the package file                          */
 /*       pcbk: a callback function for optional re-encrypting                */
-/*       pDestPath: The root location for the resolved, decrypted data       */
+/*       dst_path: The root location for the resolved, decrypted data       */
 /*       pass: The passkey in clear text for decrypting the package          */
 /* OUTPUT:                                                                   */
 /*       serial: an identifying number for the associated files              */
@@ -1506,318 +1337,755 @@ static CertReturnCode_t getNextSerialNumber(int32_t *serial) {
 /*             localKeyID                                                    */
 /*      2) Similarly, attributes cannot be stored in the private key EVP_PKEY*/
 /*      3) default locations are as follows:                                 */
-/*             certificates:  pDestPath/new_certs/    rwxr-x---              */
-/*             private key:   pDestPath/private/      rwx------              */
-/*             public key:    pDestPath/public/       rwxr-xr-x              */
+/*             certificates:  dst_path/new_certs/    rwxr-x---              */
+/*             private key:   dst_path/private/      rwx------              */
+/*             public key:    dst_path/public/       rwxr-xr-x              */
 /*      4) The passkey must be a NULL terminated string                      */
 /*                                                                           */
 /*--***********************************************************************--*/
 
-CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
-		CertPassCallback pcbk, void *pass, int32_t *serial)
+static CertReturnCode p12ToFile(const char *pkg_path, const char *dst_path, CertPassCallback pcbk, void *pass, int *o_sn)
 {
-    CertReturnCode_t result = CERT_OK;
-
-    fprintf(stdout, "%s %s \n", __FUNCTION__, pPkgPath);
-
-    char *baseName = fileBaseName(pPkgPath);
-    int certInstalled = 0;
-
-    EVP_PKEY *pkey;
+    char *base_name;
     X509 *cert;
+    EVP_PKEY *pkey;
     STACK_OF(X509) *ca;
-    int32_t serialNb = 0;
-    int32_t duplicateSerial = 0;
+    CertReturnCode result;
+    int sn = 0, is_duplicated = 0;
 
-
-    if ((result = getNextSerialNumber(&serialNb)) != CERT_OK) {
-	return result;
-    } else {
-	*serial = serialNb;
+    if (pkg_path == NULL)
+    {
+        return CERT_INVALID_ARG;
     }
 
-
-    if ((result = p12ToX509(pPkgPath, pass, &cert, &pkey, &ca)) == CERT_OK) {
-	//		char dbPath[MAX_CERT_PATH] = {'\0'};
-
-	/*
-	 * We've gotten everything,
-	 * now let's write it out the the dest
-	 */
-
-	if (NULL != cert) {
-	    char *certPath;
-	    FILE *fp;
-
-	    if ((duplicateSerial = findSSLCertInLocalStore(cert)) != 0) {
-		*serial = serialNb = duplicateSerial;
-		fprintf(stdout, "%s duplicate cert found %d\n", __FUNCTION__, duplicateSerial);
-	    }
-
-	    certPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
-		    CERT_OBJECT_CERTIFICATE, serialNb);
-
-	    if (NULL != (fp = fopen(certPath, "w"))) {
-
-		PEM_write_X509(fp, cert);
-		fclose(fp);
-	    }
-	    certInstalled++;
-
-	    free(certPath);
-	}
-
-	if (NULL != pkey) {
-	    int32_t keyType;
-	    char *pkeyPath;
-	    char *destPath;
-	    FILE *fp;
-
-
-	    /* find out what type of key it is */
-	    keyType = getPrivKeyType(pkey);
-	    if (keyType >= CERT_OBJECT_MAX_OBJECT) {
-		fprintf(stdout, "unknown keyType %d\n",keyType);
-		/* not sure what else to do here */
-	    }
-	    else {
-		pkeyPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY, keyType,
-			serialNb);
-		fp = fopen(pkeyPath, "w");
-		switch (keyType) {
-		    case CERT_OBJECT_RSA_PRIVATE_KEY:
-			PEM_write_RSAPrivateKey(fp, (RSA *)pkey->pkey.rsa,
-				(const EVP_CIPHER *)pcbk, NULL, 0, 0, pass);
-			certInstalled++;
-			break;
-		    case CERT_OBJECT_EC_PRIVATE_KEY:
-			/* ECDSA */
-			/* NOTE: we append the private key to the cert because
-			 ** WAPI expects that.  The real (secure) way to do this
-			 ** is to store the key in keymanager
-			 */
-			destPath = serialPathName(baseName,
-				CERT_DIR_CERTIFICATES,
-				    CERT_OBJECT_CERTIFICATE, serialNb);
-
-			FILE *pfp;
-			if (NULL != (pfp = fopen(destPath, "a"))) {
-			    PEM_write_ECPrivateKey(pfp,
-				(EC_KEY *)pkey->pkey.ec,
-				    NULL, NULL, 0, 0, NULL);
-			    fclose(pfp);
-			} else {
-			    fprintf(stdout,
-				    "%s unable to write ECDSA private key\n",
-				    __FUNCTION__);
-			}
-
-			free(destPath);
-
-			certInstalled++;
-			break;
-		    default:
-			fprintf(stdout, "%s keyType %d\n", __FUNCTION__, keyType);
-			break;
-		}
-
-		fclose(fp);
-		free(pkeyPath);
-		EVP_PKEY_free(pkey);
-	    }
-	}
-
-	if (NULL != ca) {
-	    int count = 1;
-	    char *caPath = 0;
-	    unsigned long hash = 0;
-	    X509 *x509;
-	    FILE *fp;
-
-	    if (cert) {
-		hash = X509_subject_name_hash(cert);
-		fprintf(stdout, "%s hash 0x%lx\n", __FUNCTION__, hash);
-	    }
-
-	    /* this is the list of CA certs for verification */
-	    /* the file is the hased name of the certificate subject */
-	    while ((ca != NULL) && ((x509 = sk_X509_pop(ca)) != NULL)) {
-		caPath = serialPathNameCount(baseName, CERT_DIR_CERTIFICATES,
-			CERT_OBJECT_C_AUTHORIZATION, serialNb, count++);
-		if (NULL != (fp = fopen(caPath, "w"))) {
-		    char filename[MAX_CERT_PATH];
-		    memset(filename, 0, sizeof(filename));
-		    fprintf(stdout, "%s ca install %s\n", __FUNCTION__, caPath);
-		    PEM_write_X509(fp, x509);
-		    fprintf(stdout, "%s ca hash 0x%lx\n", __FUNCTION__,
-			    X509_subject_name_hash(x509));
-		    if (CERT_OK == mkFileNameFromHash(filename,
-				sizeof(filename), X509_subject_name_hash(x509),
-				caPath, CERTCFG_TRUSTED_CA_DIR)) {
-			if (-1 == symlink(caPath, filename)) {
-			    fprintf(stderr, "ERROR %d creating symlink '%s' -> '%s'\n",
-				    errno, caPath, filename);
-			}
-		    }
-		    fclose(fp);
-		    certInstalled++;
-		} else {
-		    perror("cert_mgr");
-		    result = CERT_FILE_ACCESS_FAILURE;
-		}
-
-	    }
-
-	    if(0 < certInstalled && duplicateSerial == 0) {
-		result = CertCreateDatabaseItem(cert, baseName, serialNb, "X");
-		fprintf(stdout, "%s item created in db \n", __FUNCTION__);
-	    } else {
-		result = CERT_OK;
-	    }
-
-	    //			if (CERT_OK == result) {
-	    //				CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, dbPath,
-	    //						MAX_CERT_PATH);
-	    //				result = CertWriteDatabase(dbPath);
-	    //			}
-
-	    free(caPath);
-	    if (ca)
-		sk_X509_free(ca);
-	}
+    if (o_sn == NULL)
+    {
+        return CERT_NULL_BUFFER;
     }
 
-    if (baseName)
-	free(baseName);
+    base_name = fileBaseName(pkg_path);
+
+    if (base_name == NULL)
+    {
+        return CERT_GENERAL_FAILURE;
+    }
+
+    DPRINTF("%s %s \n", __FUNCTION__, pkg_path);
+
+    result = getNextSerialNumber(&sn);
+
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    result = p12ToX509(pkg_path, pass, &cert, &pkey, &ca);
+
+    if (result != CERT_OK)
+    {
+        goto done;
+    }
+
+    *o_sn = sn;
+
+    /* We've gotten everything,
+     * now let's write it out the the dest */
+
+    result = installX509Cert(cert, base_name, sn) == CERT_OK);
+
+    if (result != CERT_OK)
+    {
+        if (result == CERT_DUPLICATE)
+        {
+            is_duplicated = 1;
+            result = CERT_OK;
+        }
+
+        goto done;
+    }
+
+    if (pkey != NULL)
+    {
+        CertObject key_type;
+
+        /* find out what type of key it is */
+        key_type = getPrivKeyType(pkey);
+
+        if (key_type >= CERT_OBJECT_MAX_OBJECT)
+        {
+            DPRINTF("unknown keyType %d\n", key_type);
+            /* not sure what else to do here */
+            /* XXX: Should we break and error out or can we continue to CA? */
+        }
+        else
+        {
+            switch (key_type)
+            {
+            case CERT_OBJECT_RSA_PRIVATE_KEY:
+                result = installDSAPrivKey((RSA *)pkey->pkey.rsa, base_name, sn);
+                break;
+
+            case CERT_OBJECT_EC_PRIVATE_KEY:
+                result = installECPrivKey((EC_KEY *)pkey->pkey.ec, base_name, sn);
+                break;
+
+            default:
+                DPRINTF("%s keyType %d\n", __FUNCTION__, key_type);
+                break;
+            }
+        }
+    }
+
+    if (ca != NULL)
+    {
+        result = installCACerts(ca, base_name, sn);
+    }
+
+done:
+    if ((result == CERT_OK) && (!is_duplicated))
+    {
+        result = CertCreateDatabaseItem(cert, base_name, sn, CERT_STATUS_UNKNOWN);
+        DPRINTF("%s item created in db \n", __FUNCTION__);
+    }
+
+    X509_free(cert);
+
+    if (pkey != NULL)
+    {
+        EVP_PKEY_free(pkey);
+    }
+
+    if (ca != NULL)
+    {
+        sk_X509_free(ca);
+    }
+
+    free(base_name);
 
     return result;
-} /* p12ToFile */
+}
 
-CertReturnCode_t isDup(const char* path1, const char* path2) {
-	CertReturnCode_t result = CERT_OK;
-	X509 *cert1 = NULL;
-	X509 *cert2 = NULL;
-	FILE* fpIn1 = fopen(path1, "r");
-	FILE* fpIn2 = fopen(path2, "r");
+static CertReturnCode derToFile(const char *cert_path, const char *dst_path, int *o_sn)
+{
+    int sn;
+    FILE *der_file;
+    char *base_name;
+    CertReturnCode result;
 
-	if (NULL != fpIn1) {
-		cert1 = PEM_read_X509(fpIn1, NULL, NULL,
-				NULL);
-	} else {
-		fprintf(stdout, "%s file1 null \n", __FUNCTION__);
-	}
+    if (cert_path == NULL)
+    {
+        return CERT_INVALID_ARG;
+    }
 
-	if (NULL != fpIn2) {
-		cert2 = PEM_read_X509(fpIn2, NULL, NULL,
-				NULL);
-	} else {
-		fprintf(stdout, "%s file2 null \n", __FUNCTION__);
-	}
+    if (o_sn == NULL)
+    {
+        return CERT_NULL_BUFFER;
+    }
 
-	fprintf(stdout, "%s look for dup %s %s\n", __FUNCTION__, path1, path2);
-	if(cert1 != NULL && cert2 != NULL) {
-		if (X509_cmp(cert1, cert2) == 0) {
-			result = CERT_DUPLICATE;
-			fprintf(stdout, "%s duplicate found \n", __FUNCTION__);
-		}
-		X509_free(cert1);
-		X509_free(cert2);
-	} else {
-		fprintf(stdout, "%s cert null \n", __FUNCTION__);
-	}
+    result = getNextSerialNumber(&sn);
 
-	if (NULL != fpIn1) fclose(fpIn1);
-	if (NULL != fpIn2) fclose(fpIn2);
-	return result;
-} /* isDup */
+    if (result != CERT_OK)
+    {
+        return result;
+    }
 
-CertReturnCode_t isCertFile(const char* pName) {
-	int32_t len = strlen(pName);
-	return len > 2 /* not . or .. */
-	|| (len == 1 && pName[0] != '.') || (len == 2 && pName[0] != '.'
-			&& pName[1] != '.' );
-} /* isCertFile */
+    der_file = fopen(cert_path, "r");
 
+    if (der_file == NULL)
+    {
+        DPRINTF("%s file access failure \n", __FUNCTION__);
+        return CERT_FILE_ACCESS_FAILURE;
+    }
+
+    char *base_name = fileBaseName(cert_path);
+
+    if (base_name == NULL)
+    {
+        result = CERT_GENERAL_FAILURE;
+    }
+    else
+    {
+        X509 *cert;
+        DSA *dsa_priv, *dsa_pub;
+        RSA *rsa_priv, *rsa_pub;
+        EC_KEY *ec_priv_key;
+        X509_CRL *crl;
+
+        cert = d2i_X509_fp(der_file, NULL);
+
+        if (cert == NULL)
+        {
+            DPRINTF("%s no cert \n", __FUNCTION__);
+            result = CERT_BAD_CERTIFICATE;
+            goto cleanup;
+        }
+
+        result = installX509Cert(cert, base_name, &sn);
+        X509_free(cert);
+
+        /* If a duplicate certificate is found, just skip installation */
+        /* FIXME: This will bite us if the installation of keys failed
+         * and we retry installation becuase it'd simply skip over */
+        if (result != CERT_OK)
+        {
+            if (result == CERT_DUPLICATE)
+            {
+                *o_sn = sn;
+                result = CERT_OK;
+            }
+
+            goto cleanup;
+        }
+
+        DPRINTF("%s item created in db \n", __FUNCTION__);
+
+        rewind(der_file);
+        dsa_priv = d2i_DSAPrivateKey_fp(der_file, NULL);
+
+        if (dsa_priv != NULL)
+        {
+            DPRINTF("%s DSA private key read \n", __FUNCTION__);
+
+            result = installDSAPrivKey(dsa_priv, base_name, sn);
+            DSA_free(dsa_priv);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        rewind(der_file);
+        dsa_pub = d2i_DSA_PUBKEY_fp(der_file, NULL);
+
+        if (dsa_pub != NULL)
+        {
+            DPRINTF("%s DSA pubkey read\n", __FUNCTION__);
+
+            result = installDSAPubKey(dsa_pub, base_name, sn);
+            DSA_free(dsa_pub);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        rewind(der_file);
+        rsa_priv = d2i_RSAPrivateKey_fp(der_file, NULL);
+
+        if (rsa_priv != NULL)
+        {
+            DPRINTF("%s RSA private key read \n", __FUNCTION__);
+            result = installRSAPrivKey(rsa_priv, base_name, sn);
+            RSA_free(rsa_priv);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        rewind(der_file);
+        rsa_pub = d2i_RSA_PUBKEY_fp(der_file, NULL);
+
+        if (rsa_pub != NULL)
+        {
+            DPRINTF("%s RSA public key read \n", __FUNCTION__);
+            result = installRSAPubKey(rsa_pub, base_name, sn);
+            RSA_free(rsa_pub);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        rewind(der_file);
+        ec_priv_key = d2i_ECPrivateKey_fp(der_file, NULL);
+
+        if (ec_priv_key != NULL)
+        {
+            DPRINTF("%s ECDSA private key read \n", __FUNCTION__);
+            result = installECPrivKey(ec_priv_key, base_name, sn);
+            EC_KEY_free(ec_priv_key);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        /* Don't need to write EC pub key, just cert */
+
+        rewind(der_file);
+        crl = d2i_X509_CRL_fp(der_file, NULL);
+
+        if (crl != NULL)
+        {
+            DPRINTF("%s crl read 0x%lX\n", __FUNCTION__, X509_NAME_hash(X509_CRL_get_issuer(crl)));
+            result = installX509CRL(crl, base_name, sn);
+            X509_CRL_free(crl);
+        }
+
+        /* Set the output SN if everything went OK */
+        *o_sn = sn;
+
+cleanup:
+        free(base_name);
+    }
+
+    fclose(der_file);
+
+    return result;
+}
+
+static CertReturnCode pemToFile(const char *cert_path, const char *dst_path, CertPassCallback pcbk, void *pwd_ctxt, int *o_sn)
+{
+    int sn;
+    FILE *pem_file;
+    char *base_name;
+    CertReturnCode result;
+
+    result = getNextSerialNumber(&sn);
+
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    pem_file = fopen(pCertPath, "r");
+
+    if (pem_file == NULL)
+    {
+        DPRINTF("%s file access failure \n", __FUNCTION__);
+        return CERT_FILE_ACCESS_FAILURE;
+    }
+
+    base_name = fileBaseName(pCertPath);
+
+    if (base_name == NULL)
+    {
+        result = CERT_GENERAL_FAILURE;
+    }
+    else
+    {
+        X509 *cert;
+        DSA *dsa_priv, *dsa_pub;
+        RSA *rsa_priv, *rsa_pub;
+        EC_KEY *ec_priv_key;
+        X509_CRL *crl;
+        struct cm_pem_cb_data pcs =
+        {
+            .cb = cb,
+            .ctx = pwd_ctxt,
+            .pwd_len = -1,
+            .cached_pwd = NULL
+        };
+
+        cert = PEM_read_X509(pem_file, NULL, pem_callback, &pcs);
+
+        if (cert == NULL)
+        {
+            DPRINTF("%s no cert \n", __FUNCTION__);
+            result = CERT_BAD_CERTIFICATE;
+            goto cleanup;
+        }
+
+        result = installX509Cert(cert, base_name, &sn);
+        X509_free(cert);
+
+        /* If a duplicate certificate is found, just skip installation */
+        /* FIXME: This will bite us if the installation of keys failed
+         * and we retry installation becuase it'd simply skip over */
+        if (result != CERT_OK)
+        {
+            if (result == CERT_DUPLICATE)
+            {
+                *o_sn = sn;
+                result = CERT_OK;
+            }
+
+            goto cleanup;
+        }
+
+        rewind(pem_file);
+        dsa_priv = PEM_read_DSAPrivateKey(pem_file, NULL, pem_callback, &pcs);
+
+        if (dsa_priv != NULL)
+        {
+            DPRINTF("%s DSA private key read \n", __FUNCTION__);
+
+            result = installDSAPrivKey(dsa_priv, base_name, sn);
+            DSA_free(dsa_priv);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        rewind(pem_file);
+        dsa_pub = PEM_read_DSA_PUBKEY(pem_file, NULL, pem_callback, &pcs);
+
+        if (dsa_pub != NULL)
+        {
+            DPRINTF("%s DSA pubkey read\n", __FUNCTION__);
+
+            result = installDSAPubKey(dsa_pub, base_name, sn);
+            DSA_free(dsa_pub);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        rewind(pem_file);
+        rsa_priv = PEM_read_RSAPrivateKey(pem_file, NULL, pem_callback, &pcs);
+
+        if (rsa_priv != NULL)
+        {
+            DPRINTF("%s RSA private key read \n", __FUNCTION__);
+            result = installRSAPrivKey(rsa_priv, base_name, sn);
+            RSA_free(rsa_priv);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        rewind(pem_file);
+        rsa_pub = PEM_read_RSA_PUBKEY(pem_file, NULL, pem_callback, &pcs);
+
+        if (rsa_pub != NULL)
+        {
+            DPRINTF("%s RSA public key read \n", __FUNCTION__);
+            result = installRSAPubKey(rsa_pub, base_name, sn);
+            RSA_free(rsa_pub);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        rewind(pem_file);
+        ec_priv_key = PEM_read_ECPrivateKey(pem_file, NULL, pem_callback, &pcs);
+
+        if (ec_priv_key != NULL)
+        {
+            DPRINTF("%s ECDSA private key read \n", __FUNCTION__);
+            result = installECPrivKey(ec_priv_key, base_name, sn);
+            EC_KEY_free(ec_priv_key);
+
+            if (result != CERT_OK)
+            {
+                goto cleanup;
+            }
+        }
+
+        /* Don't need to write EC pub key, just cert */
+
+        rewind(pem_file);
+        crl = PEM_read_X509_CRL(pem_file, NULL, NULL, NULL);
+
+        if (crl != NULL)
+        {
+            DPRINTF("%s crl read 0x%lX\n", __FUNCTION__, X509_NAME_hash(X509_CRL_get_issuer(crl)));
+            result = installX509CRL(crl, base_name, sn);
+            X509_CRL_free(crl);
+        }
+
+        /* Set the output SN if everything went OK */
+        *o_sn = sn;
+
+cleanup:
+        /* It sure looks weird that we need to cleanup the callback's
+         * allocation, but this code smell was probably deemed necessary
+         * by whoever wrote the "optimization" over at Palm */
+        if (pcs.cached_pwd != NULL)
+        {
+            free(pcs.cached_pwd);
+        }
+
+        free(base_name);
+    }
+
+    fclose(pem_file);
+
+    return result;
+}
+
+static int pem_callback(char *o_buf, int len, int rwflag, void *cb_arg)
+{
+    struct cm_pem_cb_data *pcs = (struct cm_pem_cb_data *)cb_arg;
+
+    /* This appears to be an optimization of some sort in order to
+     * avoid calling the callback every time a password is required
+     * (thus avoiding heavy operations that the callback might need
+     *  to do -- such as accessing a DB to get the password, etc.) */
+
+    if ((cached_pwd != NULL) && (len >= pcs->pwd_len))
+    {
+        DPRINTF(stdout, "%s have cache %s \n", __FUNCTION__, pcs->pwdCache);
+        memcpy(o_buf, pcs->cached_pwd, pcs->pwd_len);
+    }
+    else if (pcs->cb != NULL)
+    {
+        DPRINTF("%s password %s %d \n", __FUNCTION__, (char*)pcs->ctxt, result);
+        pcs->pwd_len = (*pcs->cb)(o_buf, len, pcs->ctxt);
+
+        if (pcs->pwd_len > 0)
+        {
+            pcs->cached_pwd = (char *)malloc(pcs->pwd_len);
+
+            if (pcs->cached_pwd != NULL)
+            {
+                memcpy(pcs->cached_pwd, o_buf, pcs->pwd_len);
+            }
+        }
+    }
+
+    return pcs->pwd_len;
+}
+
+static CertReturnCode getNextSerialNumber(int *o_sn)
+{
+    int sn = 0;
+    char serial_file[MAX_CERT_PATH];
+    CertReturnCode_t result;
+
+    if (o_sn == NULL)
+    {
+        return CERT_NULL_BUFFER;
+    }
+
+    /* lock the database              */
+    if (CertLockFile(CERT_FILELOCK_DATABASE) != CERT_OK)
+    {
+        return CERT_GENERAL_FAILURE;
+    }
+
+    /* Get the current serial number  */
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_SERIAL_NAME, serial_file, sizeof(serial_file));
+
+    if (result == CERT_OK)
+    {
+        sn = CertGetSerialNumberInc(serial_file, 1);
+
+        if (sn != 0)
+        {
+            *o_sn = sn;
+        }
+        else
+        {
+            result = CERT_SERIAL_NUMBER_UNAVAILABLE;
+        }
+    }
+
+    CertUnlockFile(CERT_FILELOCK_DATABASE);
+
+    return result;
+}
+
+static CertReturnCode checkIfCertsDiffer(const char *path1, const char *path2)
+{
+    X509 *cert1, *cert2;
+    FILE *file1, *file2;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if ((path1 == NULL) || (path2 == NULL))
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    file1 = fopen(path1, "r");
+
+    if (file1 == NULL)
+    {
+        goto done;
+    }
+
+    file2 = fopen(path2, "r");
+
+    if (file2 == NULL)
+    {
+        goto close_file1;
+    }
+
+    cert1 = PEM_read_X509(file1, NULL, NULL, NULL);
+
+    if (cert1 == NULL)
+    {
+        goto cleanup_files;
+    }
+
+    cert2 = PEM_read_X509(file2, NULL, NULL, NULL);
+
+    if (cert2 == NULL)
+    {
+        goto cleanup_cert1;
+    }
+
+    DPRINTF("%s look for dup %s %s\n", __FUNCTION__, path1, path2);
+
+    if (X509_cmp(cert1, cert2) != 0)
+    {
+        result = CERT_OK;
+    }
+    else
+    {
+        result = CERT_DUPLICATE;
+        DPRINTF("%s duplicate found \n", __FUNCTION__);
+    }
+
+cleanup_certs:
+    X509_free(cert2);
+
+cleanup_cert1:
+    X509_free(cert1);
+
+cleanup_files:
+    fclose(file2);
+
+close_file1:
+    fclose(file1);
+
+done:
+    return result;
+}
+
+static CertReturnCode removeBrokenLinkFiles(void)
+{
+    char cert_path[MAX_CERT_PATH];
+
+    if ((CertCfgGetObjectStrValue(CERTCFG_CERT_DIR, cert_path, sizeof(cert_path)) != CERT_OK) ||
+        (cert_path[0] == '\0'))
+    {
+        DPRRINTF("CertInitCertMgr unable to read cert path");
+        strcpy(cert_path, "/var/ssl/certs");
+    }
+
+    if (cmutils_rmdeadlinks(cert_path, 1) != 0)
+    {
+        return CERT_GENERAL_FAILURE;
+    }
+    // XXX also remove links from cache dir
+
+    return CERT_OK;
+}
 
 /*
 * ericm: remove a single link to a cert
 */
-CertReturnCode_t removeLink(unsigned long hash, const char *fullpath,
-	certcfg_Property_t basedir)
+static CertReturnCode removeCertLink(unsigned long hash, const char *fullpath, CertCfgProperty basedir)
 {
-    CertReturnCode_t result = CERT_GENERAL_FAILURE;
-
-    char filename[MAX_CERT_PATH];
+    CertReturnCode result;
     char dir[MAX_CERT_PATH];
-    char linkpath[MAX_CERT_PATH];
+    char filename[MAX_CERT_PATH];
+    int pos, ext_ctr = 0, left_space;
 
-    if (CERT_OK == (result = CertCfgGetObjectStrValue(basedir,
-		    dir, MAX_CERT_PATH))) {
-	int32_t pos;
-	int32_t extCounter;
+    result = CertCfgGetObjectStrValue(basedir, dir, sizeof(dir));
 
-
-	snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
-	pos = strlen(filename);
-
-	result = CERT_GENERAL_FAILURE;
-	/* Look for the link to the cert */
-	/* stop after the first one we find as there should be only one */
-	for (extCounter = 0;
-		result != CERT_OK && extCounter < CERT_MAX_HASHED_FILES;
-		++extCounter)
-	{
-	    struct stat statbuf;
-	    snprintf(filename + pos, sizeof(filename)-pos, "%d", extCounter);
-	    if (lstat(filename,&statbuf) == 0) {
-		if (S_ISLNK(statbuf.st_mode)) {
-		    /* check that the link points to our cert */
-		    int len = readlink(filename,linkpath,sizeof(linkpath)-1);
-		    if (len > 0) {
-			linkpath[len] = '\0'; // null terminate
-			if (strncmp(fullpath,linkpath,MAX_CERT_PATH) == 0) {
-			    if (unlink(filename) == 0)
-				result = CERT_OK;
-			}
-		    }
-		}
-	    }
-	}
+    if (result != CERT_OK)
+    {
+        return result;
     }
-    return result;
+
+    /* We can't work with empty value */
+    if (dir[0] == '\0')
+    {
+        return CERT_GENERAL_FAILURE;
+    }
+
+    pos = snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
+
+    if (pos >= filename)
+    {
+        CERT_BUFFER_LIMIT_EXCEEDED;
+    }
+
+    left_space = sizeof(filename) - pos;
+
+    /* Look for the link to the cert */
+    /* stop after the first one we find as there should be only one */
+    do /* while (ext_ctr < CERT_MAX_HASHED_FILES) */
+    {
+        struct stat statbuf;
+
+        if (snprintf(filename + pos, left_space, "%d", ext_ctr) >= left_space)
+        {
+            return CERT_BUFFER_LIMIT_EXCEEDED;
+        }
+
+        if ((lstat(filename,&statbuf) == 0) && (S_ISLNK(statbuf.st_mode)))
+        {
+            char linkpath[MAX_CERT_PATH];
+
+            /* check that the link points to our cert */
+            int len = readlink(filename, linkpath, sizeof(linkpath));
+
+            if (len < 0)
+            {
+                return CERT_GENERAL_FAILURE;
+            }
+
+            /* XXX: This is unsafe. We might remove another link that only
+             * happen to succeed in path comparison because its path begins
+             * with the same characters, though I'm not sure if we should
+             * just fail the removal in that case */
+
+            /* No need to NUL terminate. We only compare the first
+             * MAX_CERT_PATH bytes at most */
+            if ((strncmp(fullpath, linkpath, MAX_CERT_PATH) == 0) &&
+                (unlink(filename) == 0))
+            {
+                return CERT_OK;
+            }
+        }
+    } while (ext_ctr < CERT_MAX_HASHED_FILES);
+
+    return CERT_GENERAL_FAILURE;
 }
 
-
 /*
-* ericm: remove the links to a cert
-*/
-CertReturnCode_t removeLinks(const char *fullpath)
+ * ericm: remove the links to a cert
+ */
+static CertReturnCode removeAllCertLinks(const char *fullpath)
 {
-
-    CertReturnCode_t result = CERT_GENERAL_FAILURE;
-
-    X509* cert = NULL;
-    unsigned long hash;
+    X509 *cert;
+    CertReturnCode result;
 
     result = CertPemToX509(fullpath, &cert);
 
-    if (cert && (CERT_OK == result)) {
-        hash = X509_subject_name_hash(cert);
+    if ((result == CERT_OK) && (cert != NULL))
+    {
+        CertReturnCode snd_result;
+        unsigned long hash = X509_subject_name_hash(cert);
 
         /* delete links in both dirs */
-        result = removeLink(hash, fullpath, CERTCFG_AUTH_CERT_DIR);
+        result = removeCertLink(hash, fullpath, CERTCFG_AUTH_CERT_DIR);
 
         /* try to delete the other link even if the first failed */
-        result = removeLink(hash, fullpath, CERTCFG_TRUSTED_CA_DIR);
+        snd_result = removeCertLink(hash, fullpath, CERTCFG_TRUSTED_CA_DIR);
+
+        /* Pick the result of the second link removal if it failed */
+        if (snd_result != CERT_OK)
+        {
+            result = snd_result;
+        }
 
         X509_free(cert);
     }
-        return result;
+
+    return result;
 }
 
 /*--***********************************************************************--*/
 /*                                                                           */
-/* FUNCTION: removeFromPath                                                  */
+/* FUNCTION: removeCert                                                  */
 /*       Remove a certificate and its hash links from a certificate store    */
 /* INPUT:                                                                    */
 /*       cert: the name of the certificate                                   */
@@ -1835,138 +2103,84 @@ CertReturnCode_t removeLinks(const char *fullpath)
 /*                                                                           */
 /*--***********************************************************************--*/
 
-CertReturnCode_t removeFromPath(const int32_t certID, const char *path,
-		const char *prefix, const char *ext, int32_t *err)
+static CertReturnCode removeCert(int sn, const char *path, const char *prefix, const char *ext, int *o_err)
 {
-    char certStr[MAX_CERT_PATH];
-    char fullPath[MAX_CERT_PATH];
+    int counter;
+    char full_path[MAX_CERT_PATH];
 
-    int32_t len;
-    CertReturnCode_t result;
+    DSYSLOG(LOG_INFO, "func: %s, prefix: %s", __FUNCTION__,prefix);
 
-    syslog(LOG_INFO,"func: %s, prefix: %s", __FUNCTION__,prefix);
-
-    if (NULL == path) {
-	return CERT_UNDEFINED_DESTINATION;
+    if (path == NULL)
+    {
+        return CERT_UNDEFINED_DESTINATION;
     }
 
-    snprintf(certStr, sizeof(certStr), "%X", certID);
-
-    len = strlen(path) + 1;
-    len += strlen(certStr) + 1;
-    len += strlen(ext) + 2; /* don't forget the dot  */
-
-    /* check to see if we have enough space */
-    // add 1 for the intervening '/'
-
-    if (MAX_CERT_PATH < len) {
-	result = CERT_PATH_LIMIT_EXCEEDED;
-    } else {
-	int counter = 0;
-	snprintf(fullPath, sizeof(fullPath), "%s/%s%s.%s", path, prefix,
-		certStr, ext);
-
-	if(!strcmp(prefix,""))prefix="ca"; // for pfx certs(eg: E.pfx) delete files of the form caE_0.pem, caE_1.pem
-
-	for (counter = 0; counter < CERT_MAX_HASHED_FILES; ++counter) {
-	    if (exists(fullPath)) {
-		    /* don't pass along return code from removeLinks
-		    ** since not all "certs" we remove here will have links
-		    */
-		    removeLinks(fullPath);
-		if (0 == unlink(fullPath)) {
-		    result = CERT_OK;
-		} else {
-		    fprintf(stdout, "unlink failed - %s - %s\n", __FUNCTION__, fullPath);
-		    result = CERT_LINK_ERR;
-		    *err = errno;
-		    PRINT_ERROR2(strerror(errno), errno);
-		}
-		snprintf(fullPath, sizeof(fullPath), "%s/%s%s_%d.%s", path, prefix,
-			certStr, counter, ext);
-	    } else {
-		fprintf(stdout, "file not found - %s - %s\n", __FUNCTION__, fullPath);
-		result = CERT_LINK_ERR;
-		break;
-	    }
-	}
-
+    if ((prefix == NULL) || (ext == NULL))
+    {
+        CERT_INVALID_ARG;
     }
 
-    return result;
-} /* removeFromPath */
+    if (o_err == NULL)
+    {
+        return CERT_NULL_BUFFER;
+    }
 
-#if 0
-_cert_IterPriv * mkCertIter(const char *dir)
-{
-	_cert_IterPriv *piter = calloc(1, sizeof(*piter));
+    /* for pfx certs(eg: E.pfx) delete files of the form caE_0.pem, caE_1.pem */
+    if (prefix[0] == '\0')
+    {
+        prefix = "ca";
+    }
 
-	if (NULL != piter)
-	{
-		piter->dir = opendir(dir);
-	}
+    if (snprintf(full_path, sizeof(full_path),
+                 "%s/%s%X.%s", path, prefix, sn, ext) >= sizeof(full_path))
+    {
+        return CERT_PATH_LIMIT_EXCEEDED;
+    }
 
-	return piter;
+    for (counter = 0; counter < CERT_MAX_HASHED_FILES; ++counter)
+    {
+        if (!cmutils_exists(full_path))
+        {
+            DPRINTF("file not found - %s - %s\n", __FUNCTION__, full_path);
+            break;
+        }
+
+        /* don't pass along return code from removeAllCertLinks
+        ** since not all "certs" we remove here will have links
+        */
+        removeAllCertLinks(full_path);
+
+        if (unlink(full_path) != 0)
+        {
+            DPRINTF("unlink failed - %s - %s\n", __FUNCTION__, full_path);
+            *err = errno;
+            PRINT_ERROR2(strerror(errno), errno);
+
+            return CERT_LINK_ERR;
+        }
+
+        if (snprintf(full_path, sizeof(full_path),
+                     "%s/%s%s_%d.%s", path, prefix, certStr, counter, ext) >= sizeof(full_path))
+        {
+            return CERT_BUFFER_LIMIT_EXCEEDED;
+        }
+    }
+
+    /* Return error if we broke out because no file has been found */
+    if (counter <= 0)
+    {
+        return CERT_LINK_ERR;
+    }
+
+    /* No error */
+    o_err = 0;
+
+    return CERT_OK;
 }
-
-void freeCertIter( cert_Iterator_t* iter )
-{
-	_cert_IterPriv* piter = (_cert_IterPriv*)iter;
-
-	closedir( piter->dir );
-
-	free( piter );
-	/*     return CERT_OK; */
-}
-
-CertReturnCode_t getNextCert( cert_Iterator_t* pIter, const char** hPath )
-{
-	CertReturnCode_t result = CERT_GENERAL_FAILURE;
-
-	CERT_NULL_PARAMETER_CHECK( pIter );
-	CERT_NULL_PARAMETER_CHECK( hPath );
-
-	_cert_IterPriv* piter = (_cert_IterPriv*)pIter;
-	do
-	{
-		struct dirent* dent = readdir( piter->dir );
-		if ( dent == NULL )
-		{
-			result = CERT_ITER_EXCEED;
-		}
-		else if ( isCertFile( dent->d_name ) )
-		{
-			*hPath = dent->d_name;
-			result = CERT_OK;
-		}
-	}while ( result == CERT_GENERAL_FAILURE );
-
-	return result;
-} /* getNextCert */
-
-CertReturnCode_t makeCertIter(cert_Iterator_t **hIter, int32_t isSystem)
-{
-	char dir[MAX_CERT_PATH];
-	int32_t len = sizeof(dir);
-	CertReturnCode_t result;
-	result = isSystem ?
-	getSystemCertDir(dir, &len) : getUserCertDir(dir, &len);
-	if (CERT_OK == result)
-	{
-		_cert_IterPriv* piter = mkCertIter(dir);
-		if (piter != NULL)
-		{
-			*hIter = (cert_Iterator_t*)piter;
-			result = CERT_OK;
-		}
-	}
-	return result;
-}
-#endif
 
 /*--***********************************************************************--*/
 /*                                                                           */
-/* FUNCTION: mkFileNameFromHash                                              */
+/* FUNCTION: getCertLinkPath                                              */
 /*       Make a file name from the first 4 bytes of the file's hash          */
 /* INPUT:                                                                    */
 /*       buf: */
@@ -1987,49 +2201,78 @@ CertReturnCode_t makeCertIter(cert_Iterator_t **hIter, int32_t isSystem)
 /*                                                                           */
 /*--***********************************************************************--*/
 
-CertReturnCode_t mkFileNameFromHash(char *buf, int32_t bufSize,
-		unsigned long hash, const char *infile,
-		certcfg_Property_t basedir)
+static CertReturnCode getCertLinkPath(char *o_buf, int len, unsigned long hash, const char *infile, CertCfgProperty basedir)
 {
-    CertReturnCode_t result = CERT_GENERAL_FAILURE;
+    int pos, ext_ctr = 0, space_left;
+    CertReturnCode result;
     char filename[MAX_CERT_PATH];
     char dir[MAX_CERT_PATH];
 
-    /* CERTCFG_AUTH_CERT_DIR, */
-    if (CERT_OK == (result = CertCfgGetObjectStrValue(basedir,
-		    dir, MAX_CERT_PATH))) {
-	int32_t extCounter;
-	int32_t pos;
-
-	snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
-
-	pos = strlen(filename);
-
-	/* Let's check to see if we've already installed this certificate */
-	for (extCounter = 0; extCounter < CERT_MAX_HASHED_FILES; ++extCounter) {
-	    snprintf(filename + pos, sizeof(filename)-pos, "%d", extCounter);
-	    if (exists(filename)) {
-		/* the same name, is it the same inside ? */
-		if (isDup(filename, infile) != CERT_OK) {
-		    result = CERT_DUPLICATE;
-		    break;
-		}
-	    } else {
-		snprintf(buf, bufSize, "%s", filename);
-		result = CERT_OK;
-		break;
-	    }
-	}
-	if (CERT_MAX_HASHED_FILES <= extCounter)
-	    result = CERT_TOO_MANY_HASHED_FILES;
+    if (o_buf == NULL)
+    {
+        return CERT_NULL_BUFFER;
     }
 
+    if (len <= 0)
+    {
+        return CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
+
+    result = CertCfgGetObjectStrValue(basedir, dir, sizeof(dir));
+
+    /* CERTCFG_AUTH_CERT_DIR, */
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    if (dir[0] == '\0')
+    {
+        return CERT_UNDEFINED_DESTINATION;
+    }
+
+    pos = snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
+
+    if (pos >= sizeof(filename))
+    {
+        return CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
+
+    space_left = sizeof(filename) - pos;
+
+    /* Let's check to see if we've already installed this certificate */
+    for (ext_ctr = 0; ext_ctr < CERT_MAX_HASHED_FILES; ++ext_ctr)
+    {
+        if (snprintf(filename + pos, space_left, "%d", ext_ctr) >= space_left)
+        {
+            return CERT_INSUFFICIENT_BUFFER_SPACE;
+        }
+
+        if (!cmutils_exists(filename))
+        {
+            if (snprintf(o_buf, len, "%s", filename) >= len)
+            {
+                return CERT_INSUFFICIENT_BUFFER_SPACE;
+            }
+
+            return CERT_OK;
+        }
+
+        /* the same name, is it the same inside ? */
+        if (checkIfCertsDiffer(filename, infile) == CERT_DUPLICATE)
+        {
+            return CERT_DUPLICATE;
+        }
+    }
+
+    return CERT_TOO_MANY_HASHED_FILES;
+
     return result;
-} /* mkFileNameFromHash */
+}
 
 /*--***********************************************************************--*/
 /*                                                                           */
-/* FUNCTION: returnFileType                                                  */
+/* FUNCTION: getFileType                                                  */
 /* INPUT:                                                                    */
 /*       file: the file name                                                 */
 /* OUTPUT:                                                                   */
@@ -2041,519 +2284,430 @@ CertReturnCode_t mkFileNameFromHash(char *buf, int32_t bufSize,
 /*                                                                           */
 /*--***********************************************************************--*/
 
-int returnFileType(const char *file) {
-	int32_t i;
-	char *extn = strrchr(file, '.');
-
-	if (NULL == extn)
-		return 0;
-
-	/* start from 1 because 0 is "UNKNOWN"  */
-	for (i = 1; i < CERT_MAX_FILE_EXTENSIONS; i++) {
-		if (!strcasecmp(ext_a[i], extn + 1)) {
-			break;
-		}
-	}
-	return ((i >= CERT_MAX_FILE_EXTENSIONS) ? 0 : i);
-}
-
-
-
-CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t *serial)
+static CertFileExt getFileType(const char *file)
 {
-    int32_t serialNb = 0;
-    int32_t duplicateSerial = 0;
-    CertReturnCode_t rValue = CERT_GENERAL_FAILURE;
-    BIO *bio;
-    X509 *cert;
+    static const char *ext_a[CERT_MAX_FILE_EXTENSIONS] =
+    {
+#       define CM_VAL(ext, str) str
+        CERTMGR_FILE_EXTS
+#       undef CM_VAL
+    };
+    int type;
+    char *extn;
 
 
-    if ((rValue = getNextSerialNumber(&serialNb)) != CERT_OK) {
-	return rValue;
-    } else {
-	*serial = serialNb;
+    if (file == NULL)
+    {
+        goto error;
     }
 
-    bio = BIO_new(BIO_s_mem());
-    if (NULL != bio) {
+    extn = strrchr(file, '.');
 
-	FILE* fpIn = fopen(pCertPath, "r");
-
-	if (NULL != fpIn) {
-	    char *baseName;
-	    char *destPath;
-	    DSA *dsa = NULL;
-	    RSA *rsa = NULL;
-	    EC_KEY *ec_key = NULL;
-	    X509_CRL *crl = NULL;
-	    FILE *fp;
-
-	    baseName = fileBaseName(pCertPath);
-	    cert = d2i_X509_fp(fpIn, NULL);
-
-	    if (NULL != cert) {
-		fprintf(stdout, "%s cert found \n", __FUNCTION__);
-		char *certPath;
-		FILE *fp;
-
-		if ((duplicateSerial = findSSLCertInLocalStore(cert)) != 0) {
-		    *serial = serialNb = duplicateSerial;
-		    fprintf(stdout, "%s duplicate cert found %d\n", __FUNCTION__, duplicateSerial);
-		}
-
-		certPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
-			CERT_OBJECT_CERTIFICATE, serialNb);
-		if (NULL != (fp = fopen(certPath, "w"))) {
-
-		    PEM_write_X509(fp, cert);
-		    fclose(fp);
-		}
-		if(duplicateSerial == 0) {
-		    rValue = CertCreateDatabaseItem(cert, baseName, serialNb, "X");
-		    fprintf(stdout, "%s item created in db \n", __FUNCTION__);
-		} else {
-		    rValue = CERT_OK;
-		}
-
-		free(certPath);
-
-	    }else {
-		fprintf(stdout, "%s no cert \n", __FUNCTION__);
-		rValue = CERT_BAD_CERTIFICATE;
-	    }
-
-	    if (NULL != cert) {
-		dsa = d2i_DSAPrivateKey_fp(fpIn, NULL);
-		if (NULL != dsa) {
-		    fprintf(stdout, "%s DSA private key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-			    CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSAPrivateKey(fp, dsa, NULL, NULL, 0, 0, NULL);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write DSA private key\n", __FUNCTION__);
-		    }
-
-		    DSA_free(dsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		dsa = d2i_DSA_PUBKEY_fp(fpIn, NULL);
-		if (NULL != dsa) {
-		    fprintf(stdout, "%s DSA pubkey read\n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
-			    CERT_OBJECT_DSA_PUBLIC_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSA_PUBKEY(fp, dsa);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write DSA pub key\n", __FUNCTION__);
-		    }
-		    DSA_free(dsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		rsa = d2i_RSAPrivateKey_fp(fpIn, NULL);
-		if (NULL != rsa) {
-		    fprintf(stdout, "%s RSA private key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-			    CERT_OBJECT_RSA_PRIVATE_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_RSAPrivateKey(fp, rsa, NULL,
-				NULL, 0, 0, NULL);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write RSA private key\n", __FUNCTION__);
-		    }
-
-		    RSA_free(rsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		rsa = d2i_RSA_PUBKEY_fp(fpIn, NULL);
-		if (NULL != rsa) {
-		    fprintf(stdout, "%s RSA public key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
-			    CERT_OBJECT_RSA_PUBLIC_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_RSAPublicKey(fp, rsa);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write RSA pub key\n", __FUNCTION__);
-		    }
-
-		    RSA_free(rsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		/* ECDSA */
-		/* NOTE: we append the private key to the cert because
-		** WAPI expects that.  The real (secure) way to do this
-		** is to store the key in keymanager
-		*/
-		rewind(fpIn);
-		ec_key = d2i_ECPrivateKey_fp(fpIn, NULL);
-		if (NULL != ec_key) {
-		    fprintf(stdout,
-			"%s ECDSA private key read \n", __FUNCTION__);
-
-		    destPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
-			CERT_OBJECT_CERTIFICATE, serialNb);
-
-		    if (NULL != (fp = fopen(destPath, "a"))) {
-			PEM_write_ECPrivateKey(fp, ec_key,
-				NULL, NULL, 0, 0, NULL);
-			fclose(fp);
-		    } else {
-			fprintf(stdout,
-				"%s unable to write ECDSA private key\n",
-				__FUNCTION__);
-		    }
-
-		    EC_KEY_free(ec_key);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		/*
-		don't need to write EC pub key, just cert
-		*/
-
-		rewind(fpIn);
-		crl = d2i_X509_CRL_fp(fpIn, NULL);
-		if (NULL != crl) {
-		    fprintf(stdout, "%s crl read 0x%lX\n", __FUNCTION__, X509_NAME_hash(X509_CRL_get_issuer(crl)));
-
-		    char *certPath;
-		    FILE *fp;
-
-		    certPath = serialPathName(baseName, CERT_DIR_CRL,
-			    CERT_OBJECT_CRL, serialNb);
-		    if (NULL != (fp = fopen(certPath, "w"))) {
-			PEM_write_X509_CRL(fp, crl);
-			fclose(fp);
-			char command[255] = {'\0'};
-			snprintf(command, sizeof(command), "gzip %s", certPath);
-			fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (-1 == system(command)) {
-			    fprintf(stderr, "ERROR compressing cert file '%s'\n", certPath);
-			}
-		    }
-		    free(certPath);
-		    X509_CRL_free(crl);
-		    rValue = CERT_OK;
-		} else {
-		    fprintf(stdout, "%s no crl \n", __FUNCTION__);
-		}
-	    }
-	    free(baseName);
-	    fclose(fpIn);
-	} else {
-	    fprintf(stdout, "%s file access failure \n", __FUNCTION__);
-	    rValue = CERT_FILE_ACCESS_FAILURE;
-	}
-
-	BIO_free(bio);
+    if (extn == NULL)
+    {
+        goto error;
     }
-    return rValue;
-}
-typedef struct PrvPemCallbackStruct {
-	CertPassCallback cb;
-	void* ctxt;
-	char pwdCache[64];
-	int32_t haveCache;
-} PrvPemCallbackStruct;
 
-int pem_callback(char* buf, int32_t len, int32_t rwflag, void* cb_arg) {
-	/* Appears this is supposed to return pwd length */
-	PrvPemCallbackStruct* pcs = (PrvPemCallbackStruct*)cb_arg;
-	CertReturnCode_t result;
+    /* Skip the dot */
+    ++extn;
 
-	if (pcs->haveCache) {
-		fprintf(stdout, "%s have cache %s \n", __FUNCTION__, pcs->pwdCache);
-		snprintf(buf, len, "%s", pcs->pwdCache);
-		result = CERT_OK;
-	} else if (NULL == pcs->cb) {
-		fprintf(stdout, "%s invalid\n", __FUNCTION__);
-		result = CERT_INVALID_ARG;
-	} else {
-		result = (*pcs->cb)(buf, len, pcs->ctxt);
-		fprintf(stdout, "%s password %s %d \n", __FUNCTION__, (char*)pcs->ctxt, result);
-	}
+    /* start from 1 because 0 is "UNKNOWN"  */
+    for (type = CERT_UNKNOWN_FILE + 1; type < CERT_MAX_FILE_EXTENSIONS; ++type)
+    {
+        if (strcasecmp(ext_a[type], extn) == 0)
+        {
+            return type;
+        }
+    }
 
-	int32_t res = (CERT_OK == result) ? strlen(buf) : 0;
-
-	if (res && !pcs->haveCache) {
-		snprintf(pcs->pwdCache, sizeof(pcs->pwdCache), "%s", buf);
-		pcs->haveCache = true;
-	}
-
-	return res;
+error:
+    return CERT_UNKNOWN_FILE;
 }
 
-CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
-		CertPassCallback pcbk, void* pwd_ctxt, int32_t *serial)
+static CertReturnCode installCACerts(STACK_OF(X509) *ca, const char *base_name, int sn)
 {
-    int32_t serialNb = 0;
-    int32_t duplicateSerial = 0;
-    CertReturnCode_t rValue = CERT_GENERAL_FAILURE;
-    BIO *bio;
-    X509 *cert;
+    X509 *x509;
+    int item_idx;
+    CertReturnCode result;
 
-    if ((rValue = getNextSerialNumber(&serialNb)) != CERT_OK) {
-	return rValue;
-    } else {
-	*serial = serialNb;
+    if (ca == NULL)
+    {
+        return CERT_BAD_CERTIFICATE;
     }
 
-    bio = BIO_new(BIO_s_mem());
-    if (NULL != bio) {
-
-	PrvPemCallbackStruct pcs;
-	pcs.cb = pcbk;
-	pcs.ctxt = pwd_ctxt;
-	pcs.haveCache = false;
-
-	FILE* fpIn = fopen(pCertPath, "r");
-
-	if (NULL != fpIn) {
-	    char *baseName;
-	    char *destPath;
-	    DSA *dsa = NULL;
-	    RSA *rsa = NULL;
-	    EC_KEY *ec_key = NULL;
-	    X509_CRL *crl = NULL;
-
-	    FILE *fp;
-
-	    baseName = fileBaseName(pCertPath);
-	    cert = PEM_read_X509(fpIn, NULL, (pem_password_cb *)pem_callback,
-		    NULL);
-
-	    if (NULL != cert) {
-		fprintf(stdout, "%s cert found \n", __FUNCTION__);
-		char *certPath;
-		FILE *fp;
-
-		// see if this is a duplicate.
-		if ((duplicateSerial = findSSLCertInLocalStore(cert)) != 0) {
-		    *serial = serialNb = duplicateSerial;
-		    fprintf(stdout, "%s duplicate cert found %d\n", __FUNCTION__, duplicateSerial);
-		}
-
-		certPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
-			CERT_OBJECT_CERTIFICATE, serialNb);
-		if (!certPath) {
-			fprintf(stdout, "cert path too long in %s:%d\n",
-			 __FUNCTION__,__LINE__);
-			rValue = CERT_PATH_LIMIT_EXCEEDED;
-		}
-
-		else {
-		    // success
-		    if (NULL != (fp = fopen(certPath, "w"))) {
-
-			PEM_write_X509(fp, cert);
-			fclose(fp);
-		    }
-		    if (duplicateSerial == 0) {
-			rValue = CertCreateDatabaseItem(cert, baseName, serialNb, "X");
-			fprintf(stdout, "%s item created in db \n", __FUNCTION__);
-		    } else {
-			rValue = CERT_OK;
-		    }
-#if 0
-		    if (CERT_OK == rValue)
-		    {
-			char dbPath[MAX_CERT_PATH];
-
-			CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
-				dbPath, MAX_CERT_PATH);
-			rValue = CertWriteDatabase(dbPath);
-		    }
-#endif
-		}
-		free(certPath);
-
-	    } else {
-		fprintf(stdout, "%s no cert \n", __FUNCTION__);
-		rValue = CERT_BAD_CERTIFICATE;
-	    }
-
-	    if (NULL != cert) {
-		dsa = PEM_read_DSAPrivateKey(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != dsa) {
-		    fprintf(stdout, "%s DSA private key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-			    CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSAPrivateKey(fp, dsa, (const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write DSA private key\n", __FUNCTION__);
-		    }
-
-		    DSA_free(dsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		dsa = PEM_read_DSA_PUBKEY(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != dsa) {
-		    fprintf(stdout, "%s DSA pubkey read\n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
-			    CERT_OBJECT_DSA_PUBLIC_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSA_PUBKEY(fp, dsa);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write DSA pub key\n", __FUNCTION__);
-		    }
-		    DSA_free(dsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		rsa = PEM_read_RSAPrivateKey(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != rsa) {
-		    fprintf(stdout, "%s RSA private key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-			    CERT_OBJECT_RSA_PRIVATE_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			int ret = PEM_write_RSAPrivateKey(fp, rsa, (const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
-			fprintf(stdout, "%s RSA private key write return = %d\n", __FUNCTION__, ret);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write RSA private key\n", __FUNCTION__);
-		    }
-
-		    RSA_free(rsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		rsa = PEM_read_RSA_PUBKEY(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != rsa) {
-		    fprintf(stdout, "%s RSA public key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
-			    CERT_OBJECT_RSA_PUBLIC_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_RSAPublicKey(fp, rsa);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write RSA pub key\n", __FUNCTION__);
-		    }
-
-		    RSA_free(rsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		/* ECDSA */
-		/* NOTE: we append the private key to the cert because
-		 ** WAPI expects that.  The real (secure) way to do this
-		 ** is to store the key in keymanager
-		 */
-		rewind(fpIn);
-		ec_key = PEM_read_ECPrivateKey(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != ec_key) {
-		    fprintf(stdout,
-			    "%s ECDSA private key read \n", __FUNCTION__);
-		    /*
-		       destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-		       CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
-		     */
-
-		    destPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
-			    CERT_OBJECT_CERTIFICATE, serialNb);
-
-		    if (NULL != (fp = fopen(destPath, "a"))) {
-			PEM_write_ECPrivateKey(fp, ec_key,
-				(const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
-			fclose(fp);
-		    } else {
-			fprintf(stdout,
-				"%s unable to write ECDSA private key\n",
-				__FUNCTION__);
-		    }
-
-		    EC_KEY_free(ec_key);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		/*
-		   don't need to write EC pub key, just cert
-		 */
-
-
-		rewind(fpIn);
-		crl = PEM_read_X509_CRL(fpIn, NULL, NULL, NULL);
-		if (NULL != crl) {
-		    fprintf(stdout, "%s crl read 0x%lX\n", __FUNCTION__, X509_NAME_hash(X509_CRL_get_issuer(crl)));
-
-		    char *certPath;
-		    FILE *fp;
-
-		    certPath = serialPathName(baseName, CERT_DIR_CRL,
-			    CERT_OBJECT_CRL, serialNb);
-
-		    fprintf(stdout, "%s certPath %s\n", __FUNCTION__, certPath);
-
-		    if (NULL != (fp = fopen(certPath, "w"))) {
-			PEM_write_X509_CRL(fp, crl);
-			fclose(fp);
-			char command[255] = {'\0'};
-			snprintf(command, sizeof(command), "gzip %s", certPath);
-			fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (-1 == system(command)) {
-			    fprintf(stderr, "ERROR compressing cert file '%s'\n", certPath);
-			}
-		    } else {
-			fprintf(stdout, "%s failed writing file.\n", __FUNCTION__);
-		    }
-
-		    free(certPath);
-		    X509_CRL_free(crl);
-		    rValue = CERT_OK;
-		} else {
-		    fprintf(stdout, "%s no crl \n", __FUNCTION__);
-		}
-	    }
-	    free(baseName);
-	    fclose(fpIn);
-	} else {
-	    fprintf(stdout, "%s file access failure \n", __FUNCTION__);
-	    rValue = CERT_FILE_ACCESS_FAILURE;
-	}
-
-	BIO_free(bio);
+    if (sn == 0)
+    {
+        return CERT_INVALID_ARG;
     }
-    return rValue;
-} /* x509ToFile */
+
+    /* this is the list of CA certs for verification */
+    /* the file is the hased name of the certificate subject */
+    for (item_idx = 1, result = CERT_OK; ((x509 = sk_X509_pop(ca)) != NULL) && (result == CERT_OK); ++item_idx)
+    {
+        char *ca_path = getPathBySerialCtr(base_name, CERT_DIR_CERTIFICATES, CERT_OBJECT_C_AUTHORIZATION, sn, item_idx);
+
+        if (ca_path != NULL)
+        {
+            FILE *ca_cert_file = open(ca_path, "w");
+
+            if (ca_cert_file == NULL)
+            {
+                DPRINTF("cert_mgr: %s\n", strerror(errno));
+                result = CERT_FILE_ACCESS_FAILURE;
+            }
+            else
+            {
+                if (!PEM_write_X509(ca_cert_file, x509))
+                {
+                    result = CERT_GENERAL_FAILURE;
+                }
+
+                fclose(ca_cert_file);
+
+                DPRINTF("%s ca install %s\n", __FUNCTION__, ca_path);
+                DPRINTF("%s ca hash 0x%lx\n", __FUNCTION__, X509_subject_name_hash(x509));
+
+                if (result == CERT_OK)
+                {
+                    char filename[MAX_CERT_PATH];
+
+                    result = getCertLinkPath(filename, sizeof(filename),
+                                             X509_subject_name_hash(x509),
+                                             ca_path, CERTCFG_TRUSTED_CA_DIR);
+
+                    if ((result == CERT_OK) && (symlink(ca_path, filename) == -1))
+                    {
+                        DPRINTF("ERROR %d creating symlink '%s' -> '%s'\n", errno, ca_path, filename);
+                        result = CERT_LINK_ERR;
+                    }
+                }
+            }
+
+            free(ca_path);
+        }
+
+        X509_free(x509);
+    }
+
+    return result;
+}
+
+static CertReturnCode installX509Cert(const X509 *cert, const char *base_name, int *io_sn)
+{
+    int dup_sn;
+    char *cert_path;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if (cert == NULL)
+    {
+        return CERT_BAD_CERTIFICATE;
+    }
+
+    if ((io_sn == NULL) || (*io_sn == 0))
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    dup_sn = getCertSerialFromLocalStore(cert);
+
+    if (dup_sn != 0)
+    {
+        /* Already installed. Skip */
+        *io_sn = dup_sn;
+        DPRINTF("%s duplicate cert found %d\n", __FUNCTION__, dup_sn);
+
+        return CERT_DUPLICATE;
+    }
+
+    cert_path = getPathBySerialCtr(base_name, CERT_DIR_CERTIFICATES, CERT_OBJECT_CERTIFICATE, *io_sn, count);
+
+    if (cert_path != NULL)
+    {
+        FILE *cert_file = fopen(cert_path, "w");
+
+        if (cert_file == NULL)
+        {
+            result = CERT_OPEN_FILE_FAILED;
+        }
+        else
+        {
+            if (!PEM_write_X509(out_cert_file, cert))
+            {
+                result = CERT_GENERAL_FAILURE;
+            }
+
+            fclose(cert_file);
+
+            if (result == CERT_OK)
+            {
+                result = CertCreateDatabaseItem(cert, base_name, *io_sn, CERT_STATUS_UNKNOWN);
+            }
+        }
+
+        free(cert_path);
+    }
+
+    return result;
+}
+
+static CertReturnCode installDSAPrivKey(const DSA *dsa_priv, const char *base_name, int sn)
+{
+    char *dsa_dest_priv_path;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if ((dsa_priv == NULL) || (sn == 0))
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    dsa_dest_priv_path = getPathBySerial(base_name, CERT_DIR_PRIVATE_KEY, CERT_OBJECT_DSA_PRIVATE_KEY, sn);
+
+    if (dsa_dest_priv_path != NULL)
+    {
+        FILE *dsa_priv_file = fopen(dsa_dest_priv_path, "w");
+
+        if (dsa_priv_file == NULL)
+        {
+            DPRINTF("%s unable to write DSA private key\n", __FUNCTION__);
+            result = CERT_OPEN_FILE_FAILURE;
+        }
+        else
+        {
+            if (PEM_write_DSAPrivateKey(dsa_priv_file, dsa_priv, NULL, NULL, 0, 0, NULL))
+            {
+                result = CERT_OK;
+            }
+
+            fclose(dsa_priv_file);
+        }
+
+        free(dsa_dest_priv_path);
+    }
+
+    return result;
+}
+
+static CertReturnCode installDSAPubKey(const DSA *dsa_pub, const char *base_name, int sn)
+{
+    char *dsa_dest_pub_path;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if ((dsa_pub == NULL) || (sn == 0))
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    dsa_dest_pub_path = getPathBySerial(base_name, CERT_DIR_PUBLIC_KEY, CERT_OBJECT_DSA_PUBLIC_KEY, sn);
+
+    if (dsa_dest_pub_path != NULL)
+    {
+        FILE *dsa_pub_file = fopen(dsa_dest_pub_path, "w");
+
+        if (dsa_pub_file == NULL)
+        {
+            DPRINTF("%s unable to write DSA pub key\n", __FUNCTION__);
+            result = CERT_OPEN_FILE_FAILURE;
+        }
+        else
+        {
+            if (PEM_write_DSA_PUBKEY(dsa_pub_file, dsa_pub))
+            {
+                result = CERT_OK;
+            }
+
+            fclose(dsa_pub_file);
+        }
+
+        free(dsa_dest_pub_path);
+    }
+
+    return result;
+}
+
+static CertReturnCode installRSAPrivKey(const RSA *rsa_priv, const char *base_name, int sn)
+{
+    char *rsa_dest_priv_path;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if ((rsa_priv == NULL) || (sn == 0))
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    rsa_dest_priv_path = getPathBySerial(base_name, CERT_DIR_PRIVATE_KEY, CERT_OBJECT_RSA_PRIVATE_KEY, sn);
+
+    if (rsa_dest_priv_path != NULL)
+    {
+        FILE *rsa_priv_file = fopen(rsa_dest_priv_path, "w");
+
+        if (rsa_priv_file == NULL)
+        {
+            DPRINTF("%s unable to write RSA private key\n", __FUNCTION__);
+            result = CERT_OPEN_FILE_FAILURE;
+        }
+        else
+        {
+            if (PEM_write_RSAPrivateKey(rsa_priv_file, rsa_priv, NULL, NULL, 0, 0, NULL))
+            {
+                result = CERT_OK;
+            }
+
+            fclose(rsa_priv_file);
+        }
+
+        free(rsa_dest_priv_path);
+    }
+
+    return result;
+}
+
+static CertReturnCode installRSAPubKey(const RSA *rsa_pub, const char *base_name, int sn)
+{
+    char *rsa_dest_pub_path;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if ((rsa_pub == NULL) || (sn == 0))
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    rsa_dest_pub_path = getPathBySerial(base_name, CERT_DIR_PUBLIC_KEY, CERT_OBJECT_RSA_PUBLIC_KEY, sn);
+
+    if (rsa_dest_pub_path != NULL)
+    {
+        FILE *rsa_pub_file = fopen(rsa_dest_pub_path, "w");
+
+        if (rsa_pub_file == NULL)
+        {
+            DPRINTF("%s unable to write RSA pub key\n", __FUNCTION__);
+            result = CERT_OPEN_FILE_FAILURE;
+        }
+        else
+        {
+            if (PEM_write_RSAPublicKey(rsa_pub_file, rsa_pub))
+            {
+                result = CERT_OK;
+            }
+
+            fclose(rsa_pub_file);
+        }
+
+        free(rsa_dest_pub_path);
+    }
+
+    return result;
+}
+
+static CertReturnCode installECPrivKey(const EC_KEY *ec_priv_key, const char *base_name, int sn)
+{
+    /* ECDSA */
+    /* NOTE: we append the private key to the cert because
+    ** WAPI expects that.  The real (secure) way to do this
+    ** is to store the key in keymanager
+    */
+    char *ec_dest_priv_path;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if ((ec_priv_key == NULL) || (sn == 0))
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    ec_dest_priv_path = getPathBySerial(base_name, CERT_DIR_CERTIFICATES, CERT_OBJECT_CERTIFICATE, sn);
+
+    if (ec_dest_priv_path != NULL)
+    {
+        FILE *ec_priv_file = fopen(ec_dest_priv_path, "a");
+
+        if (ec_priv_file == NULL)
+        {
+            DPRINTF("%s unable to write ECDSA private key\n", __FUNCTION__);
+            result = CERT_OPEN_FILE_FAILURE;
+        }
+        else
+        {
+            if (PEM_write_ECPrivateKey(ec_priv_file, ec_priv_key, NULL, NULL, 0, 0, NULL))
+            {
+                result = CERT_OK;
+            }
+
+            fclose(ec_priv_file);
+        }
+
+        free(ec_dest_priv_path);
+    }
+
+    return result;
+}
+
+static CertReturnCode installX509CRL(const X509_CRL *crl, const char *base_name, int sn)
+{
+    char *crl_dest_path;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if ((crl == NULL) || (sn == 0))
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    crl_dest_path = getPathBySerialCtr(base_name, CERT_DIR_CRL, CERT_OBJECT_CRL, sn);
+
+    if (crl_dest_path != NULL)
+    {
+        FILE *crl_file = fopen(crl_dest_path, "w");
+
+        if (crl_file == NULL)
+        {
+            DPRINTF("%s unable to write CRL\n", __FUNCTION__);
+            result = CERT_OPEN_FILE_FAILURE;
+        }
+        else
+        {
+            if (PEM_write_X509_CRL(crl_file, crl))
+            {
+                result = CERT_OK;
+            }
+
+            fclose(crl_file);
+
+            if (result == CERT_OK)
+            {
+                size_t crl_path_len = strlen(crl_dest_path);
+                /* CRL path + ".gz" + NUL character */
+                char *gzipped_path = (char *)malloc(crl_path_len + 4);
+
+                if (gzipped_path == NULL)
+                {
+                    result = CERT_MEMORY_ERROR;
+                }
+                else
+                {
+                    sprintf(gzipped_path, "%s.gz", crl_dest_path);
+
+                    if (cmutils_gzip(crl_dest_path, gzipped_path) != 0)
+                    {
+                        result = CERT_GENERAL_FAILURE;
+                    }
+
+                    free(gzipped_path);
+                }
+            }
+        }
+
+        free(crl_dest_path);
+    }
+
+    return result;
+}
 
 /*--***********************************************************************--*/
 /*                                                                           */
-/* FUNCTION: makePathToCert                                                  */
+/* FUNCTION: makeCertPathFromSerial                                             */
 /* INPUT:                                                                    */
-/*       serialNb: the ID of the certificate                                 */
+/*       sn: the ID of the certificate                                       */
 /*       len:  the length of the input buffer                                */
 /* OUTPUT:                                                                   */
-/*       path: The path for the certificate based on the configuration       */
+/*       o_path: The path for the certificate based on the configuration     */
 /* RETURN:                                                                   */
 /*       CERT_OK                                                             */
 /*       CERT_BUFFER_LIMIT_EXCEEDED: the input buffer is insufficient for the*/
@@ -2563,388 +2717,133 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 /*                                                                           */
 /*--***********************************************************************--*/
 
-CertReturnCode_t makePathToCert(int32_t serialNb, char *path, int32_t len) {
-    char dir[MAX_CERT_PATH];
-    CertReturnCode_t result;
-
-    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DIR, dir, MAX_CERT_PATH);
-
-    if (CERT_OK == result) {
-	char serialStr[16];
-
-	snprintf(serialStr, sizeof(serialStr), "%X", serialNb);
-	if (len <= (strlen(dir) + strlen(serialStr) + 5)) {
-	    result = CERT_BUFFER_LIMIT_EXCEEDED;
-	} else {
-	    sprintf(path, "%s/%s.pem", dir, serialStr);
-	}
-    }
-    return result;
-}
-
-CertReturnCode_t getPEMCertInfoPath(const char *pPath, certMgrField_t field,
-	char* buf, int32_t* pBufLen) {
-    CertReturnCode_t result = CERT_GENERAL_FAILURE;
-
-    X509* cert = NULL;
-    result = CertPemToX509(pPath, &cert);
-
-    if (CERT_OK == result) {
-	result = certInfoToBuffer(cert, field, buf, pBufLen);
-    }
-
-    if (NULL != cert) {
-	X509_free(cert);
-    }
-
-    return result;
-}
-
-int checkCert(X509 *cert, char *CAFile, char *CAPath);
-CertReturnCode_t validateCertPath(const char *path, int32_t serialNb,
-	int32_t certType, int32_t *pCMErr) {
-    CertReturnCode_t result;
-    X509* cert = NULL;
-
-    switch (certType) {
-	case CERTTYPE_PEM:
-	    result = CertPemToX509(path, &cert);
-	    break;
-
-	case CERTTYPE_DER:
-	    result = derToX509(path, &cert);
-	    break;
-
-	default:
-	    result = CERT_UNSUPPORTED_CERT_TYPE;
-	    break;
-    }
-
-    if (CERT_OK == result) {
-	/*
-	 * If we get here then we know that the type has been found
-	 * we use result to signal that the type has been found, so
-	 * use a local result to carry forward errors within the
-	 * certificate
-	 */
-	CertReturnCode_t lResult;
-	char caPath[MAX_CERT_PATH];
-	int32_t status = 0;
-	//      X509_STORE      *cert_ctx = NULL;
-
-	lResult = CertGetDatabaseInfo(CERT_DATABASE_ITEM_STATUS, &status);
-	if (status != (int32_t)statusNames[CERT_STATUS_TRUSTED_PEER]) { /* We trust the certificate per user's blessing, do not invalidate.*/
-	    /* TODO: return that the cert is valid. */
-	    lResult = checkCertDates(cert);
-
-	    if (lResult != CERT_OK) {
-		char dbPath[MAX_CERT_PATH];
-
-		*pCMErr = CERT_CM_ALL_OK;
-
-		if (lResult == CERT_DATE_EXPIRED) {
-		    *pCMErr |= CERT_CM_DATE_EXPIRED;
-		    result = CertUpdateDatabaseItem(dbPath, serialNb,
-			    CERT_DATABASE_ITEM_STATUS,
-			    statusNames[CERT_STATUS_EXPIRED]);
-
-		} else if (lResult == CERT_DATE_PENDING) {
-		    *pCMErr |= CERT_CM_DATE_PENDING;
-		    result = CertUpdateDatabaseItem(dbPath, serialNb,
-			    CERT_DATABASE_ITEM_STATUS,
-			    statusNames[CERT_STATUS_SUSPENDED]);
-		}
-	    }
-	}
-
-	//      cert_ctx = X509_STORE_new();
-
-
-	result = CertCfgGetObjectStrValue(CERTCFG_AUTH_CERT_DIR, caPath,
-		MAX_CERT_PATH);
-	result = checkCert(cert, NULL, caPath);
-
-	// X509_free(cert);
-    }
-
-    return result;
-}
-
-/* Need to decrypt the damned things and compare them since the same
- * thing encrypted twice will not always be the same.
- */
-int get_key_cb(char *buf, int32_t size, int32_t rwflag, void *userdata) {
-    /* userdata is a ptr to the key */
-    int32_t wantsSize = snprintf(buf, size, "%s", (const char *)userdata);
-
-    if (wantsSize >= size) {
-	wantsSize = 0;
-    }
-
-    return wantsSize;
-}
-
-#define NUM_KEYS 5
-typedef struct PrvCertCmpStruct {
-    char *keys[NUM_KEYS];
-    long dataLen;
-} PrvCertCmpStruct;
-
-CertReturnCode_t readEVPKeys(EVP_PKEY *pkey, PrvCertCmpStruct *cs) {
-    DSA* dsa = EVP_PKEY_get1_DSA(pkey);
-    if (NULL != dsa) {
-	unsigned char* c = NULL;
-
-	if (i2d_DSAPrivateKey(dsa, &c)) {
-	    cs->keys[4] = (char *)c;
-	}
-	DSA_free(dsa);
-    }
-
-    RSA* rsa = EVP_PKEY_get1_RSA(pkey);
-    if (NULL != rsa) {
-	unsigned char* c = NULL;
-
-	if (i2d_RSAPrivateKey(rsa, &c)) {
-	    cs->keys[1] = (char *)c;
-	}
-	RSA_free(rsa);
-    }
-
-    return true;
-} /* readEVPKeys */
-
-CertReturnCode_t readPemKeys(const char *path, PrvCertCmpStruct *cs,
-	char *encKey) {
-    CertReturnCode_t success= false;
-    FILE* fp = fopen(path, "r");
-
-    if (NULL != fp) {
-	char *name = NULL;
-	char *header = NULL;
-	unsigned char *data = NULL;
-	long len = 0;
-
-	if (0 != PEM_read(fp, &name, &header, &data, &len)) {
-	    OPENSSL_free(name);
-	    OPENSSL_free(header);
-	    cs->keys[0] = (char *)data;
-	    cs->dataLen = len;
-	}
-
-	EVP_PKEY* pkey = PEM_read_PrivateKey(fp, NULL, get_key_cb, encKey);
-
-	if (NULL != pkey) {
-	    success = readEVPKeys(pkey, cs);
-	    EVP_PKEY_free(pkey);
-	}
-
-	rewind(fp);
-	RSA* rsa = PEM_read_RSA_PUBKEY(fp, NULL, get_key_cb, encKey);
-	if (NULL != rsa) {
-	    unsigned char* c = NULL;
-
-	    if (i2d_RSAPublicKey(rsa, &c) ) {
-		cs->keys[2] = (char *)c;
-	    }
-
-	    RSA_free(rsa);
-	}
-
-	rewind(fp);
-	DSA* dsa = PEM_read_DSA_PUBKEY(fp, NULL, get_key_cb, encKey);
-	if (NULL != dsa) {
-	    unsigned char* c = NULL;
-	    if (i2d_DSAPublicKey(dsa, &c) ) {
-		cs->keys[4] = (char *)c;
-	    }
-
-	    DSA_free(dsa);
-	}
-
-	success = true;
-	fclose(fp);
-    }
-    return success;
-} /* readPemKeys */
-
-CertReturnCode_t precompP12Keys(const char* path1, const char* path2,
-	PrvCertCmpStruct* cs, char* encKey) {
-    CertReturnCode_t success= false;
-    FILE* fp1 = fopen(path1, "r");
-
-    if (NULL != fp1) {
-	FILE* fp2 = fopen(path2, "r");
-
-	if (NULL != fp2) {
-	    PKCS12 *p12_1 = d2i_PKCS12_fp(fp1, NULL);
-
-	    if (NULL != p12_1) {
-		PKCS12 *p12_2 = d2i_PKCS12_fp(fp2, NULL);
-
-		if (NULL != p12_2) {
-		    EVP_PKEY *pkey1;
-		    X509* cert1;
-
-		    if (1 == PKCS12_parse(p12_1, encKey, &pkey1, &cert1, NULL)) {
-			EVP_PKEY *pkey2;
-			X509* cert2;
-			if (1 == PKCS12_parse(p12_2, encKey, &pkey2, &cert2,
-				    NULL)) {
-			    int32_t same = (0 == X509_cmp(cert1, cert2));
-
-			    if (same) {
-				success = readEVPKeys(pkey1, &cs[0])
-				    && readEVPKeys(pkey2, &cs[1]);
-			    }
-			    X509_free(cert2);
-			    EVP_PKEY_free(pkey2);
-			}
-			X509_free(cert1);
-			EVP_PKEY_free(pkey1);
-		    }
-
-		    PKCS12_free(p12_2);
-		}
-		PKCS12_free(p12_1);
-	    }
-
-	    fclose(fp2);
-	}
-	fclose(fp1);
-    }
-    return success;
-}
-
-CertReturnCode_t areSameCertFile(const char *path1, const char *path2,
-	CertPkgType_t ctype) {
-    CertReturnCode_t same= false;
-    CertReturnCode_t success;
-    int32_t i, j;
-
-    char key[64];
-
-    PrvCertCmpStruct cs[2];
-    memset( &cs, 0, sizeof(cs));
-
-    switch (ctype) {
-	case CERTTYPE_PEM:
-	    success = readPemKeys(path1, &cs[0], key) && readPemKeys(path2, &cs[1],
-		    key);
-	    break;
-
-	case CERTTYPE_P12:
-	    success = precompP12Keys(path1, path2, &cs[0], key);
-	    break;
-	default:
-	    success = false;
-    }
-
-    if (success) {
-	same = true;
-
-	for (i = 0; same && i < NUM_KEYS; ++i) {
-	    if (NULL != cs[0].keys[i] && NULL != cs[1].keys[i]) {
-		if (i == 0) { /* not null-terminated */
-		    if ( (cs[0].dataLen != cs[1].dataLen) || 0 != memcmp(
-				cs[0].keys[0], cs[1].keys[0], cs[0].dataLen) ) {
-			same = false;
-		    }
-		} else {
-		    if ( 0 != strcmp(cs[0].keys[i], cs[1].keys[i]) ) {
-			same = false;
-		    }
-		}
-	    } else if (cs[0].keys[i] != cs[1].keys[i]) {
-		same = false;
-	    }
-	}
-
-	for (j = 0; j < 2; ++j) {
-	    for (i = 0; i < NUM_KEYS; ++i) {
-		char* s = cs[j].keys[i];
-		if (NULL != s) {
-		    OPENSSL_free(s);
-		}
-	    }
-	}
-    }
-
-    return same;
-} /* areSameCertFile */
-
-#if 0
-
-//
-// This function is so inherently dangerous that it has been #ifdef'd out
-//
-// Nothing, anywhere, calls it at present. If it is to be brought back to life
-// a new paramter must be added to provide the size of the output buffer.
-//
-
-/* turn foo.ext into foo_00.ext, and foo_00.ext into foo_01.ext.  This
- * is a hack, but I don't see any utilities doing it for me.
- */
-void makeUnique(char *path) {
-    while (exists(path)) {
-	char buf[MAX_CERT_PATH];
-	int32_t count = 0;
-
-	snprintf(buf, sizeof(buf), "%s", path);
-
-	char* ubar = strrchr(buf, '_');
-	char* dot = strrchr(buf, '.');
-	if (NULL == dot) {
-	    dot = buf + strlen(buf);
-	}
-	if ( (NULL == ubar) || (ubar + 3 != dot)) {
-	    /* Not our pattern.  Append the _nn */
-	    ubar = dot;
-	} else {
-	    count = 1 + atoi(ubar+1);
-	}
-
-	snprintf(ubar, sizeof(buf) - (ubar - buf), "_%.2d%s", count, strrchr(
-		    path, '.') );
-	g_strlcpy(path, buf, strlen(path));
-    }
-} /* makeUnique */
-
-#endif
-
-#if D_DEBUG_ENABLED
-    static void
-logSSLErrors()
+static CertReturnCode makeCertPathFromSerial(int sn, char *o_path, int len)
 {
-    // we'll get this error if bad passwd: PEM_F_PEM_DO_HEADER ???
-    for (;; )
+    char dir[MAX_CERT_PATH];
+    CertReturnCode result;
+
+    if (o_path == NULL)
     {
-	unsigned long sslerr = ERR_get_error();
-	if ( 0 == sslerr )
-	{
-	    break;
-	}
-	else
-	{
-	    /* Ok to call these multiple times: they're only loaded once
-	       internally. */
-	    ERR_load_CRYPTO_strings();
-	    ERR_load_SSL_strings();
-
-	    char buf[512];
-	    ERR_error_string_n( sslerr, buf, sizeof(buf) );
-
-	}
+        return CERT_NULL_BUFFER;
     }
-} /* logSSLErrors */
-#endif
+
+    if (len <= 0)
+    {
+        CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
+
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DIR, dir, sizeof(dir));
+
+    if ((result == CERT_OK) &&
+        (snprintf(o_path, len, "%s/%X.pem", dir, sn) >= len))
+    {
+        result = CERT_BUFFER_LIMIT_EXCEEDED;
+    }
+
+    return result;
+}
+
+static CertReturnCode validateCertPath(const char *path, int sn, CertPkgType cert_type, CertMgrError *o_err)
+{
+    X509 *cert;
+    CertReturnCode result;
+
+    if (path == NULL)
+    {
+        return CERT_INVALID_ARG;
+    }
+
+    if (o_err == NULL)
+    {
+        return CERT_NULL_BUFFER;
+    }
+
+    *o_err = CERT_CM_ALL_OK;
+
+    switch (cert_type)
+    {
+    case CERTTYPE_PEM:
+        result = CertPemToX509(path, &cert);
+        break;
+
+    case CERTTYPE_DER:
+        result = derToX509(path, &cert);
+        break;
+
+    default:
+        return CERT_UNSUPPORTED_CERT_TYPE;
+    }
+
+    if (result == CERT_OK)
+    {
+        /* If we get here then we know that the type has been found
+         * we use result to signal that the type has been found, so
+         * use a local result to carry forward errors within the
+         * certificate */
+        int status = 0;
+
+        /* FIXME: This code does the wrong thing and tries to cover it up by
+         * casting a string to an int. We should implement a CertGetDatabaseItemInfo
+         * function in cert_db if we want this code to do something useful */
+        if ((CertGetDatabaseInfo(CERT_DATABASE_ITEM_STATUS, &status) == CERT_OK) &&
+            (status != CERT_STATUS_TRUSTED_PEER))
+        {
+            /* We trust the certificate per user's blessing, do not invalidate.*/
+            /* TODO: return that the cert is valid. */
+            CertReturnCode cert_result = checkCertDates(cert);
+
+            if (cert_result != CERT_OK)
+            {
+                switch (cert_result)
+                {
+                case CERT_DATE_EXPIRED:
+                    *o_err |= CERT_CM_DATE_EXPIRED;
+                    result = CertUpdateDatabaseItem(sn,
+                                                    CERT_DATABASE_ITEM_STATUS,
+                                                    CertGetStatusString(CERT_STATUS_EXPIRED));
+                    break;
+
+                case CERT_DATE_PENDING:
+                    *o_err |= CERT_CM_DATE_PENDING;
+                    result = CertUpdateDatabaseItem(sn,
+                                                    CERT_DATABASE_ITEM_STATUS,
+                                                    CertGetStatusString(CERT_STATUS_SUSPENDED));
+                    break;
+
+                default:
+                    break;
+                }
+            }
+        }
+
+        if (result == CERT_OK)
+        {
+            char ca_path[MAX_CERT_PATH];
+            const char *ca_path_ptr = NULL;
+
+            if ((CertCfgGetObjectStrValue(CERTCFG_AUTH_CERT_DIR, ca_path, sizeof(ca_path)) == CERT_OK) &&
+                (ca_path[0] != '\0'))
+            {
+                ca_path_ptr = ca_path;
+            }
+
+            result = checkCert(cert, NULL, ca_path_ptr);
+        }
+
+        X509_free(cert);
+    }
+
+    return result;
+}
+
+
 /*--**************************************************************************
  * helper functions
  **************************************************************************--*/
 
 /*--***********************************************************************--*/
 /*                                                                           */
-/* FUNCTION: seed_prng                                                       */
+/* FUNCTION: seedSSLPrng                                                       */
 /*       Seed the pseudo-random number generator                             */
 /* INPUT:                                                                    */
 /*       file: the file name                                                 */
@@ -2956,134 +2855,64 @@ logSSLErrors()
 /*                                                                           */
 /*--***********************************************************************--*/
 
-int32_t seed_prng(void) {
-    /* Warning: /dev/random blocks if not enough entropy is available
-       (which is almost always the case).  If this is happening, try
-       /dev/urandom, or save seeds across boots. */
-    int32_t result = RAND_load_file("/dev/urandom", 1024);
-    assert(result);
-
-    return result;
-}
-
-/*--***********************************************************************--*/
-/*                                                                           */
-/* FUNCTION: exists                                                          */
-/*       Check to see if the given file exists                               */
-/* INPUT:                                                                    */
-/*       file: the file name                                                 */
-/* OUTPUT:                                                                   */
-/*       void                                                                */
-/* RETURN:                                                                   */
-/*       false (== 0): the file does not exist                               */
-/*                                                                           */
-/* NOTES:                                                                    */
-/*                                                                           */
-/*--***********************************************************************--*/
-
-int exists(const char *file) {
-    struct stat buf;
-    int32_t err = stat(file, &buf);
-    return err == 0;
-}
-
-/*--***********************************************************************--*/
-/*                                                                           */
-/* FUNCTION: existsIn                                                        */
-/*       Check to see if the given file exists in the given directory        */
-/* INPUT:                                                                    */
-/*       file: the given file name                                           */
-/*       dir:  the directory to check                                        */
-/* OUTPUT:                                                                   */
-/*       void                                                                */
-/* RETURN:                                                                   */
-/*       false (== 0): the file does not exist in the directory              */
-/* NOTES:                                                                    */
-/*                                                                           */
-/*--***********************************************************************--*/
-
-int32_t existsIn(const char *file, const char *dir) {
-    struct stat buf;
-    int32_t err;
-
-    err = stat(file, &buf);
-    return err == 0;
-}
-
-/*--***********************************************************************--*/
-/*                                                                           */
-/* FUNCTION: certInfoToBuffer DEPRECATED for CertX509ReadStrProperty         */
-/*        Copy the requested information to a user allocated buffer          */
-/* INPUT:                                                                    */
-/* OUTPUT:                                                                   */
-/* RETURN:                                                                   */
-/* NOTES:                                                                    */
-/*                                                                           */
-/*--***********************************************************************--*/
-
-CertReturnCode_t certInfoToBuffer(X509 *cert, certMgrField_t field, char *pBuf,
-	int32_t *pBufLen) {
-
-    int result = CERT_OK;
-    switch(field) {
-	case CERT_INFO_ISSUED_TO:
-	    result = CertX509ReadStrProperty(cert, CERTX509_SUBJECT_ORGANIZATION_NAME, pBuf, *pBufLen);
-	    break;
-	case CERT_INFO_ISSUED_BY:
-	    result = CertX509ReadStrProperty(cert, CERTX509_ISSUER_ORGANIZATION_NAME, pBuf, *pBufLen);
-	    break;
-	case CERT_INFO_START_DATE:
-	    result = CertX509ReadTimeProperty(cert, CERTX509_START_DATE, pBuf, *pBufLen);
-	    break;
-	case CERT_INFO_EXPIRATION_DATE:
-	    result = CertX509ReadTimeProperty(cert, CERTX509_EXPIRATION_DATE, pBuf, *pBufLen);
-	    break;
-	case CERT_INFO_MAX_PROPERTY:
-	    *pBufLen = 0;
-	    break;
-    }
-
-    return result;
-} /* certInfoToBuffer */
-
-int findSSLCertInLocalStore(X509 * cert)
+static int getCertSerialFromLocalStore(const X509 *cert)
 {
-    if (cert == NULL)
-	return 0;
+    if (cert != NULL)
+    {
+        int items;
 
-    int items=0;
-    //	SSL_library_init();
-    //	SSL_load_error_strings();
-    CertReturnCode_t result = CertGetDatabaseInfo(CERT_DATABASE_SIZE, &items);
-    if (result == CERT_OK) {
-	int i = 0;
-	for (i = 0; i < items; i++) {
-	    char serialStr[128] = { '\0' };
-	    result = CertGetDatabaseStrValue(i, CERT_DATABASE_ITEM_SERIAL,
-		    serialStr, 128);
-	    if (CERT_OK == result) {
-		char dir[MAX_CERT_PATH];
-		char * endPtr = NULL;
-		int serial = strtol(serialStr, &endPtr, 16);
-		result = makePathToCert(serial, dir, MAX_CERT_PATH);
-		if (CERT_OK == result) {
-		    X509 *candidate_cert = NULL;
-		    result = CertPemToX509(dir, &candidate_cert);
-		    if (candidate_cert == NULL)
-			continue;
-		    if (result == CERT_OK) {
-			//DO COMPARISON
-			if (X509_cmp(candidate_cert,cert) == 0) {
-			    return serial;
-			}
-		    }
-		}
-	    }
-	}
+        //  SSL_library_init();
+        //  SSL_load_error_strings();
+        if (CertGetDatabaseInfo(CERT_DATABASE_SIZE, &items) == CERT_OK)
+        {
+            int item_idx;
+
+            for (item_idx = 0; item_idx < items; ++item_idx)
+            {
+                char serial_str[128];
+
+                if ((CertGetDatabaseStrValue(item_idx, CERT_DATABASE_ITEM_SERIAL, serial_str, sizeof(serial_str)) == CERT_OK) &&
+                    (serial_str[0] != '\0'))
+                {
+                    char *end_ptr;
+                    char cert_path[MAX_CERT_PATH];
+                    int serial = strtol(serial_str, &end_ptr, 16);
+
+                    if (*end_ptr == '\0')
+                    {
+                        if (makeCertPathFromSerial(serial, cert_path, sizeof(cert_path)) == CERT_OK)
+                        {
+                            X509 *candidate_cert;
+
+                            if ((CertPemToX509(cert_path, &candidate_cert) == CERT_OK) &&
+                                (candidate_cert != NULL) &&
+                                (X509_cmp(candidate_cert, cert) == 0))
+                            {
+                                return serial;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+
     return 0;
 }
 
+static CertReturnCode seedSSLPrng(void)
+{
+    /* Warning: /dev/random blocks if not enough entropy is available
+       (which is almost always the case).  If this is happening, try
+       /dev/urandom, or save seeds across boots. */
+    if (RAND_load_file("/dev/urandom", 1024) == 1024)
+    {
+        return CERT_OK;
+    }
 
+    return CERT_GENERAL_FAILURE;
+}
 
-
+#ifdef __cplusplus
+}
+#endif

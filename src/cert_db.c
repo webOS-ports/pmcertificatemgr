@@ -21,9 +21,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+
 #include <openssl/conf.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -35,12 +37,10 @@
 #include <openssl/objects.h>
 #include <openssl/ocsp.h>
 #include <openssl/pem.h>
-
-
+#include <openssl/crypto.h>
 
 #include "cert_mgr.h"
 #include "cert_cfg.h"
-
 #include "cert_utils.h"
 #include "cert_db.h"
 #include "cert_debug.h"
@@ -55,102 +55,57 @@
 #  define sk_OPENSSL_PSTRING_value sk_value
 #endif
 
-int CertLockFile(int fileType);
-int CertUnlockFile(int fileType);
+typedef struct db_attr_st
+{
+  int unique_subject;
+} DB_ATTR;
 
-#ifndef W_OK
-#  define F_OK 0
-#  define X_OK 1
-#  define W_OK 2
-#  define R_OK 4
+typedef struct ca_db_st
+{
+  DB_ATTR attributes;
+  TXT_DB *db;
+} CA_DB;
+
+static CA_DB* CertLockDatabase(int user);
+static int CertUnlockDatabase(void);
+static CertStatus getCertStatusByString(const char *status);
+static void* OPENSSL_malloc_wrap(size_t sz);
+static CertReturnCode cmdb_TXT_DB_read(FILE *fp, int num);
+static int cmdb_TXT_DB_write(FILE *fp, TXT_DB *db);
+static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr);
+static CertReturnCode save_index(const char *db_path, CA_DB *db);
+static int parse_yesno(const char *str, int def);
+
+
+static CA_DB *g_clocaldb = NULL;
+static DB_ATTR g_db_attr;
+static int g_db_lock_ctr = 1;
+static int g_db_user_id = 0;
+static char g_loaded_db[MAX_CERT_PATH];
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
-#undef PROG
-#define PROG ca_main
-
-#define BASE_SECTION  "ca"
-#define CONFIG_FILE "openssl.cnf"
-#define ENV_DEFAULT_CA		"default_ca"
-
-#define STRING_MASK	"string_mask"
-#define UTF8_IN			"utf8"
-
-
-/* Additional revocation information types */
-
-#define REV_NONE            0   /* No addditional information        */
-#define REV_CRL_REASON      1   /* Value is CRL reason code          */
-#define REV_HOLD            2   /* Value is hold instruction         */
-#define REV_KEY_COMPROMISE  3   /* Value is cert key compromise time */
-#define REV_CA_COMPROMISE   4   /* Value is CA key compromise time   */
-
-const char *statusNames[] =
-  {
-    "x", "c", "C", "E", "p", "P", "R",
-    "S", "T", "V", "u", "w", "X"
-  };
-
-char statusValues[] =
-  {
-    'x', 'c', 'C', 'E', 'p', 'P', 'R', 'S', 'T', 'V', 'u', 'w', 'X'
-  };
-
-/*****************************************************************************/
-/*                                                                           */
-/* FUNCTION:                                                                 */
-/* INPUT:                                                                    */
-/* OUTPUT:                                                                   */
-/* RETURN:                                                                   */
-/* NOTES:                                                                    */
-/*                                                                           */
-/*****************************************************************************/
-
-
-CertReturnCode_t CertUpdateDatabase(void);
-
-
-/*****************************************************************************/
-/*                                                                           */
-/* FUNCTION: CertLockDatabase                                                */
-/* INPUT:                                                                    */
-/* OUTPUT:                                                                   */
-/* RETURN:                                                                   */
-/* NOTES:                                                                    */
-/*                                                                           */
-/*****************************************************************************/
-
-CA_DB *clocaldb = NULL;
-DB_ATTR db_attr;
-int32_t __DbLocked = 1;  /* the database is initially locked */
-int32_t __DbInitialized = 0;
-static int32_t userID;
-
-CA_DB *CertLockDatabase(int32_t user)
+static CA_DB* CertLockDatabase(int user)
 {
-  if (__DbLocked++ || (clocaldb == NULL))
+    /* FIXME: This is not thread-safe */
+    if ((g_db_lock_ctr++) || (g_clocaldb == NULL))
     {
-      __DbLocked--;
-      return (CA_DB *)0;
+        --g_db_lock_ctr;
+        return NULL;
     }
 
-  userID = user;
-  return clocaldb;
+    /* XXX: Is this used for anything? */
+    g_db_user_id = user;
+
+    return g_clocaldb;
 }
 
-
-/*****************************************************************************/
-/*                                                                           */
-/* FUNCTION: CertUnlockDatabase                                              */
-/* INPUT:                                                                    */
-/* OUTPUT:                                                                   */
-/* RETURN:                                                                   */
-/* NOTES:                                                                    */
-/*                                                                           */
-/*****************************************************************************/
-
-int32_t CertUnlockDatabase(void)
+static int CertUnlockDatabase(void)
 {
-  return --__DbLocked;
+    /* FIXME: This is not thread-safe */
+    return --g_db_lock_ctr;
 }
 
 
@@ -166,52 +121,58 @@ int32_t CertUnlockDatabase(void)
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertInitDatabase(char *dbName)
+CertReturnCode CertInitDatabase(const char *db_path)
 {
-  CA_DB *db;
-  struct stat statBuf;
-  CertReturnCode_t result = CERT_OK;
+    CA_DB *db;
+    struct stat statbuf;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
 
-  if (0 != __DbInitialized)
+    if (g_clocaldb != NULL)
     {
-      return CERT_DATABASE_LOCKED;
-    }
-  if (-1 == stat(dbName, &statBuf))
-    {
-      return CERT_FILE_ACCESS_FAILURE;
-    }
-  if (0 == __DbLocked)
-    {
-      return CERT_DATABASE_NOT_AVAILABLE;
+        return CERT_DATABASE_LOCKED;
     }
 
-  if (0 == (CertLockFile(CERT_DATABASE_LOCK)))
+    if (strlen(db_path) >= MAX_CERT_PATH)
     {
-      db = load_index(dbName, &db_attr);
-      if (db == NULL)
-        {
-          result = CERT_FILE_ACCESS_FAILURE;
-        }
-      else
-        {
-          clocaldb = db;
-        }
-      CertUnlockFile(CERT_DATABASE_LOCK);
-    }
-  else
-    {
-      result = CERT_LOCK_FILE_LOCKED;
-      PRINT_RETURN_CODE(result);
+        return CERT_PATH_LIMIT_EXCEEDED;
     }
 
-  /* Unlock the database in the grossest manner */
-  __DbInitialized = 1;
-  __DbLocked      = 0;
+    if (g_db_lock_ctr == 0)
+    {
+        return CERT_DATABASE_NOT_AVAILABLE;
+    }
 
-  PRINT_RETURN_CODE(result);
-  return result;
+    if (stat(db_path, &statbuf) != 0)
+    {
+        return CERT_FILE_ACCESS_FAILURE;
+    }
+
+    if ((CertInitLockFiles() != CERT_OK) ||
+        (CertLockFile(CERT_DATABASE_LOCK) != CERT_OK))
+    {
+        return CERT_LOCK_FILE_LOCKED;
+    }
+
+    db = load_index(db_path, &g_db_attr);
+
+    if (db == NULL)
+    {
+        result = CERT_FILE_ACCESS_FAILURE;
+        goto cleanup;
+    }
+
+    strcpy(g_loaded_db, db_path);
+    g_clocaldb = db;
+    result = CERT_OK;
+
+    /* Unlock the database in the grossest manner */
+    g_db_lock_ctr = 0;
+
+cleanup:
+    CertUnlockFile(CERT_DATABASE_LOCK);
+
+    return result;
 }
-
 
 /*****************************************************************************/
 /*                                                                           */
@@ -229,44 +190,70 @@ CertReturnCode_t CertInitDatabase(char *dbName)
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertReadDatabase(char *dbName)
+CertReturnCode CertReadDatabase(const char *db_path)
 {
-  CA_DB *db;
-  struct stat statBuf;
-  CertReturnCode_t result = CERT_OK;
+    int i = 100;
+    CA_DB *db;
+    struct stat statbuf;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
 
-  if (0 == __DbInitialized)
+    if (db_path == NULL)
     {
-      return CERT_DATABASE_INITIALIZATION_ERROR;
-    }
-  if (-1 == stat(dbName, &statBuf))
-    {
-      return CERT_FILE_ACCESS_FAILURE;
+        return CERT_INVALID_ARG;
     }
 
-  if (0 == (CertLockFile(CERT_DATABASE_LOCK)))
+    if (g_clocaldb == NULL)
     {
-      db = load_index(dbName, &db_attr);
-      if (db == NULL)
+        return CERT_DATABASE_INITIALIZATION_ERROR;
+    }
+
+    if (stat(db_path, &statbuf) == -1)
+    {
+        return CERT_FILE_ACCESS_FAILURE;
+    }
+
+    /* Try getting the lock a few times. Give up after 100ms */
+    while ((CertLockDatabase(1) == NULL) && (i-- > 0))
+    {
+        usleep(1000);
+    }
+
+    if (i <= 0)
+    {
+        result = CERT_DATABASE_LOCKED;
+    }
+    /* Don't reload if we already have it in memory */
+    else if (strcmp(g_loaded_db, db_path) == 0)
+    {
+        result = CERT_OK;
+    }
+    else if (CertLockFile(CERT_DATABASE_LOCK) != CERT_OK)
+    {
+        result = CERT_LOCK_FILE_LOCKED;
+    }
+    else
+    {
+        db = load_index(db_path, &g_db_attr);
+
+        if (db == NULL)
         {
-          result = CERT_FILE_ACCESS_FAILURE;
+            result = CERT_FILE_ACCESS_FAILURE;
         }
-      else
+        else
         {
-          clocaldb = db;
+            strcpy(g_loaded_db, db_path);
+            g_clocaldb = db;
+            result = CERT_OK;
         }
-      CertUnlockFile(CERT_DATABASE_LOCK);
-    }
-  else
-    {
-      result = CERT_LOCK_FILE_LOCKED;
-      PRINT_RETURN_CODE(result);
+
+        CertUnlockFile(CERT_DATABASE_LOCK);
     }
 
-  PRINT_RETURN_CODE(result);
-  return result;
+    CertUnlockDatabase();
+    PRINT_RETURN_CODE(result);
+
+    return result;
 }
-
 
 /*****************************************************************************/
 /*                                                                           */
@@ -285,49 +272,49 @@ CertReturnCode_t CertReadDatabase(char *dbName)
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertWriteDatabase(char *dbName)
+CertReturnCode CertWriteDatabase(const char *db_name)
 {
-  CA_DB *db;
-  CertReturnCode_t result = CERT_OK;
+    int i = 100;
+    CA_DB *db;
+    CertReturnCode result;
 
-  if (NULL == dbName)
+    /* Try getting the lock a few times. Give up after 100ms */
+    while ((CertLockDatabase(2) == NULL) && (i-- > 0))
     {
-      return CERT_NULL_BUFFER;
+        usleep(1000);
     }
 
-  if (0 == (CertLockFile(CERT_DATABASE_LOCK)))
+    if (i <= 0)
     {
-      char basename[MAX_CERT_PATH];
-      char suffix[64];
-      char *suffixp;
-
-      if (NULL != (suffixp = strrchr(dbName, '.')))
-        {
-          suffixp++;
-          strcpy(suffix, suffixp);
-
-        }
-      if (suffixp && ((suffixp - dbName) < strlen(dbName)))
-        {
-          strncpy(basename, dbName, (suffixp - dbName) - 1);
-          basename[(suffixp - dbName) - 1] = '\0';
-        }
-      if (NULL != (db = CertLockDatabase(2)))
-        {
-          save_index(basename, suffix, db);
-          CertUnlockDatabase();
-        }
-      else
-        {
-          result = CERT_DATABASE_NOT_AVAILABLE;
-        }
-      CertUnlockFile(CERT_DATABASE_LOCK);
+        result = CERT_DATABASE_LOCKED;
     }
-  else
+    if (CertLockFile(CERT_DATABASE_LOCK) != CERT_OK)
     {
-      result = CERT_LOCK_FILE_LOCKED;
+        result = CERT_LOCK_FILE_LOCKED;
     }
-  return result;
+    else
+    {
+        db = CertLockDatabase(2);
+
+        if (db == NULL)
+        {
+            result = CERT_DATABASE_NOT_AVAILABLE;
+            goto cleanup;
+        }
+
+        if (db_name == NULL)
+        {
+            db_name = g_loaded_db;
+        }
+
+        result = save_index(db_name, db);
+        CertUnlockFile(CERT_DATABASE_LOCK);
+    }
+
+cleanup:
+    CertUnlockDatabase();
+
+    return result;
 }
 
 
@@ -347,32 +334,47 @@ CertReturnCode_t CertWriteDatabase(char *dbName)
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertGetDatabaseInfo(int32_t property, int32_t *value)
+CertReturnCode CertGetDatabaseInfo(CertDbProperty property, int *o_val)
 {
-  CertReturnCode_t result = CERT_OK;
-  CA_DB *db;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+    CA_DB *db;
 
-  if (NULL != (db = CertLockDatabase(3)))
+    if (o_val == NULL)
     {
-      switch (property)
-        {
+        return CERT_NULL_BUFFER;
+    }
+
+    db = CertLockDatabase(3);
+
+    if (db == NULL)
+    {
+        return CERT_LOCK_FILE_LOCKED;
+    }
+
+    switch (property)
+    {
         case CERT_DATABASE_SIZE:
-           *value = sk_OPENSSL_PSTRING_num(db->db->data);
-           if (0 > *value)
-             result = CERT_PROPERTY_NOT_FOUND;
-           break;
+            *o_val = sk_OPENSSL_PSTRING_num(db->db->data);
+
+            if (*o_val < 0)
+            {
+                result = CERT_PROPERTY_NOT_FOUND;
+            }
+            else
+            {
+                result = CERT_OK;
+            }
+
+            break;
 
         default:
-          result = CERT_UNKNOWN_PROPERTY;
-          break;
-        }
-      CertUnlockDatabase();
+            result = CERT_UNKNOWN_PROPERTY;
+            break;
     }
-  else
-    {
-      result = CERT_DATABASE_NOT_AVAILABLE;
-    }
-  return result;
+
+    CertUnlockDatabase();
+
+    return result;
 }
 
 
@@ -397,63 +399,59 @@ CertReturnCode_t CertGetDatabaseInfo(int32_t property, int32_t *value)
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertGetDatabaseStrValue(int32_t index,
-                            CertDbItemProperty_t property,
-                            char *propertyStr, int32_t len)
+CertReturnCode CertGetDatabaseStrValue(int index, CertDbItemProperty property, char *o_buf, int len)
 {
-  const char **pp;
-  CertReturnCode_t result = CERT_OK;
-  CA_DB *db;
+    CA_DB *db;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
 
-
-  if (NULL != (db = CertLockDatabase(4)))
+    if (o_buf == NULL)
     {
-      if ((int32_t)sk_OPENSSL_PSTRING_num(db->db->data) < index)
+        return CERT_NULL_BUFFER;
+    }
+
+    db = CertLockDatabase(4);
+
+    if (db == NULL)
+    {
+        return CERT_LOCK_FILE_LOCKED;
+    }
+
+    if (index >= sk_OPENSSL_PSTRING_num(db->db->data))
+    {
+        result = CERT_DATABASE_OUT_OF_BOUNDS;
+    }
+    else
+    {
+        const char **pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, index);
+
+        switch (property)
         {
-          result = CERT_DATABASE_OUT_OF_BOUNDS;
-        }
-      else
-        {
-          pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, index);
-          switch (property)
+        case CERT_DATABASE_ITEM_STATUS:
+        case CERT_DATABASE_ITEM_EXPIRATION:
+        case CERT_DATABASE_ITEM_START:
+        case CERT_DATABASE_ITEM_SERIAL:
+        case CERT_DATABASE_ITEM_FILE:
+        case CERT_DATABASE_ITEM_NAME:
+            if (snprintf(o_buf, len, "%s", pp[property]) >= len)
             {
-            case CERT_DATABASE_ITEM_STATUS:
-            case CERT_DATABASE_ITEM_EXPIRATION:
-            case CERT_DATABASE_ITEM_START:
-            case CERT_DATABASE_ITEM_SERIAL:
-            case CERT_DATABASE_ITEM_FILE:
-            case CERT_DATABASE_ITEM_NAME:
-              if (len < strlen(pp[property]))
-                {
-                  result = CERT_BUFFER_LIMIT_EXCEEDED;
-                }
-              else
-                {
-                  if (!strlen(pp[property]))
-                    {
-                      propertyStr[0] = '\0';
-                    }
-                  else
-                    {
-                      strncpy(propertyStr,
-                              pp[property],
-                              strlen(pp[property]) + 1);
-                    }
-                }
-              break;
-
-            default:
-              result = CERT_UNKNOWN_PROPERTY;
-              break;
+                result = CERT_BUFFER_LIMIT_EXCEEDED;
             }
+            else
+            {
+                result = CERT_OK;
+            }
+
+            break;
+
+        default:
+            result = CERT_UNKNOWN_PROPERTY;
+            break;
         }
-      CertUnlockDatabase();
     }
-  else
-    {
-      result = CERT_DATABASE_LOCKED;
-    }
-  return result;
+
+    CertUnlockDatabase();
+
+    return result;
 }
 
 
@@ -478,165 +476,181 @@ CertReturnCode_t CertGetDatabaseStrValue(int32_t index,
 /*          alternative one.                                                 */
 /*                                                                           */
 /*****************************************************************************/
-char *newMem(const void *data, int32_t len)
+
+CertReturnCode CertCreateDatabaseItemDirect(const char *db_path, const X509 *x509, const char *file_name, int sn, CertStatus status)
 {
-  char *nBuf;
+    CA_DB *db;
+    ASN1_UTCTIME *asn_time;
+    const char *status_str;
+    char serial_str[(sizeof(sn) * 2) + 1]; /* Amount of hex digits (digit == nibble) + NUL character */
+    char *record[CERT_DATABASE_ITEM_MAX];
+    char **existing_row = NULL, **new_row = NULL;
+    CertReturnCode result;
 
-  nBuf = (void *)malloc(len + 1);
-  if (NULL == nBuf)
-    return 0;
+    status_str = CertGetStatusString(status);
 
-  memcpy(nBuf, data, len);
-  nBuf[len] = 0;
-  return nBuf;
-}
-
-CertReturnCode_t CertCreateDatabaseItem(X509 *x509, char *name, int32_t serial, const char *value)
-{
-  CertReturnCode_t result;
-  int32_t i;
-  char *row[CERT_DATABASE_ITEM_MAX];
-  char **rrow;
-  char **irow;
-  ASN1_UTCTIME *Ansitm = NULL;
-  CA_DB *db;
-  char serialStr[64];
-  char dbPath[MAX_CERT_PATH];
-
-  if (NULL == value)
-    return CERT_NULL_BUFFER;
-
-  result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
-                                    dbPath, MAX_CERT_PATH);
-  if (CERT_OK != result)
-    return result;
-
-  result = CertReadDatabase(dbPath);
-  if (CERT_OK != result)
-    return result;
-
-  for (i = 0; i < CERT_DATABASE_ITEM_MAX; i++)
-    row[i] = NULL;
-
-  if (NULL != (db = CertLockDatabase(5)))
+    if (status_str == NULL)
     {
-      /* Look for to see if the corresponding serial number exists */
+        return CERT_INVALID_ARG;
+    }
 
-      rrow = TXT_DB_get_by_index(db->db,
-                                 CERT_DATABASE_ITEM_SERIAL,
-                                 row);
+    result = CertReadDatabase(db_path);
 
-      /* here we're looking at something brand new, so we can add it  */
-      if (rrow == NULL)
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    memset(record, 0, sizeof(record));
+
+    db = CertLockDatabase(5);
+
+    if (db == NULL)
+    {
+        return CERT_DATABASE_LOCKED;
+    }
+
+    sprintf(serial_str, "%04x", sn);
+    record[CERT_DATABASE_ITEM_SERIAL] = serial_str;
+
+    /* Look for to see if the corresponding sn number exists */
+    existing_row = TXT_DB_get_by_index(db->db, CERT_DATABASE_ITEM_SERIAL, record);
+
+    /* Here we're looking at something brand new, so we can add it  */
+    if (existing_row != NULL)
+    {
+        result = CERT_DATABASE_ITEM_EXISTS;
+        goto done;
+    }
+
+    DPRINTF("Adding Entry with serial number %d to DB for %s\n", sn, file_name);
+
+    /* We now just add it to the database */
+
+    /* Find the expiration date           */
+    asn_time = X509_get_notAfter(x509);
+
+    /* Fortunately for us ASN1_TIME is just a string without NUL terminator
+     * so we only need to duplicate and NUL terminate it */
+    record[CERT_DATABASE_ITEM_EXPIRATION] =
+        (char *)cmutils_memdup(OPENSSL_malloc_wrap, asn_time->data, asn_time->length, 1);
+
+    if (record[CERT_DATABASE_ITEM_EXPIRATION] == NULL)
+    {
+        result = CERT_MEMORY_ERROR;
+        goto done;
+    }
+
+    asn_time = X509_get_notBefore(x509);
+    record[CERT_DATABASE_ITEM_START] =
+        (char *)cmutils_memdup(OPENSSL_malloc_wrap, asn_time->data, asn_time->length, 1);
+
+    if (record[CERT_DATABASE_ITEM_START] == NULL)
+    {
+        result = CERT_MEMORY_ERROR;
+        goto done;
+    }
+
+    /* Copy the file name */
+    record[CERT_DATABASE_ITEM_FILE] =
+        (char *)cmutils_memdup(OPENSSL_malloc_wrap, file_name, strlen(file_name), 1);
+
+    if (record[CERT_DATABASE_ITEM_FILE] == NULL)
+    {
+        result = CERT_MEMORY_ERROR;
+        goto done;
+    }
+
+    /* Copy the status */
+    record[CERT_DATABASE_ITEM_STATUS] =
+        (char *)cmutils_memdup(OPENSSL_malloc_wrap, status_str, strlen(status_str), 1);
+
+    if (record[CERT_DATABASE_ITEM_STATUS] == NULL)
+    {
+        result = CERT_MEMORY_ERROR;
+        goto done;
+    }
+
+    /* Copy the serial number */
+    record[CERT_DATABASE_ITEM_SERIAL] =
+        (char *)cmutils_memdup(OPENSSL_malloc_wrap, serial_str, strlen(serial_str), 1);
+
+    if (record[CERT_DATABASE_ITEM_SERIAL] == NULL)
+    {
+        result = CERT_MEMORY_ERROR;
+        goto done;
+    }
+
+    record[CERT_DATABASE_ITEM_NAME] = X509_NAME_oneline(X509_get_subject_name((X509 *)x509), NULL, 0);
+
+    if (record[CERT_DATABASE_ITEM_NAME] == NULL)
+    {
+        result = CERT_MEMORY_ERROR;
+        goto done;
+    }
+
+    new_row = (char **)OPENSSL_malloc(sizeof(char *) * (CERT_DATABASE_ITEM_MAX + 1));
+
+    if (new_row == NULL)
+    {
+        result = CERT_MEMORY_ERROR;
+        goto done;
+    }
+
+    /* Copy data pointers */
+    memcpy(new_row, record, sizeof(record));
+    new_row[CERT_DATABASE_ITEM_MAX] = NULL;
+
+    if (!TXT_DB_insert(db->db, new_row))
+    {
+        DPRINTF("failed to update database\n");
+        DPRINTF("TXT_DB error number %ld\n", db->db->error);
+        result = CERT_GENERAL_FAILURE;
+        goto done;
+    }
+
+    result = CERT_OK;
+
+done:
+    CertUnlockDatabase();
+
+    if ((result != CERT_OK) || ((result = CertWriteDatabase(NULL)) != CERT_OK))
+    {
+        int i;
+
+        /* FIXME: If Write fails here, what do we do with the inserted item? */
+        if (new_row != NULL)
         {
-          fprintf(stderr, "Adding Entry with serial number %d to DB for %s\n",
-                  serial, name);
+            OPENSSL_free(new_row);
+        }
 
-          /* We now just add it to the database */
-
-          /* Find the expiration date           */
-          Ansitm = X509_get_notAfter(x509);
-
-          row[CERT_DATABASE_ITEM_EXPIRATION] =
-            (char *)newMem(Ansitm->data,
-                           Ansitm->length + 1);
-          if (NULL == row[CERT_DATABASE_ITEM_EXPIRATION])
+        for (i = 0; i < CERT_DATABASE_ITEM_MAX; ++i)
+        {
+            if (record[i] != NULL)
             {
-              result = CERT_MEMORY_ERROR;
-              goto err;
-            }
-
-          row[CERT_DATABASE_ITEM_FILE] = (char *)newMem(name,
-                                                        strlen(name) + 1);
-          if (NULL == row[CERT_DATABASE_ITEM_FILE])
-            {
-              result = CERT_MEMORY_ERROR;
-              goto err;
-            }
-
-
-          row[CERT_DATABASE_ITEM_STATUS] = (char *)newMem(value,
-                                                          strlen(value) + 1);
-          if (NULL == row[CERT_DATABASE_ITEM_STATUS])
-
-            {
-              result = CERT_MEMORY_ERROR;
-              goto err;
-            }
-
-          snprintf (serialStr, sizeof(serialStr), "%04x", serial);
-          row[CERT_DATABASE_ITEM_SERIAL] = (char *)newMem(serialStr,
-                                                          strlen(serialStr)+1);
-          if (NULL == row[CERT_DATABASE_ITEM_SERIAL])
-            {
-              result = CERT_MEMORY_ERROR;
-              goto err;
-            }
-
-          row[CERT_DATABASE_ITEM_NAME] =
-            X509_NAME_oneline(X509_get_subject_name(x509), NULL, 0);
-
-          if (NULL == row[CERT_DATABASE_ITEM_NAME])
-            {
-              result = CERT_MEMORY_ERROR;
-              goto err;
-            }
-
-          Ansitm = X509_get_notBefore(x509);
-
-          row[CERT_DATABASE_ITEM_START] =
-            (char *)newMem(Ansitm->data,
-                           Ansitm->length + 1);
-          if (NULL == row[CERT_DATABASE_ITEM_START])
-            {
-              result = CERT_MEMORY_ERROR;
-              goto err;
-            }
-
-
-
-          if ((irow =
-               (char **)malloc(sizeof(char *) *
-                               (CERT_DATABASE_ITEM_MAX + 1))) ==
-              NULL)
-            {
-              result = CERT_MEMORY_ERROR;
-              goto err;
-            }
-
-          for (i = 0; i < CERT_DATABASE_ITEM_MAX; i++)
-            {
-              irow[i] = row[i];
-              row[i]  = NULL;
-            }
-          irow[CERT_DATABASE_ITEM_MAX] = NULL;
-
-          if (!TXT_DB_insert(db->db, irow))
-            {
-              fprintf(stderr,"failed to update database\n");
-              fprintf(stderr,"TXT_DB error number %ld\n",db->db->error);
+                OPENSSL_free(record[i]);
             }
         }
-      CertUnlockDatabase();
-    }
-  else
-    {
-      result = CERT_DATABASE_LOCKED;
     }
 
-  if (CERT_OK == result)
-    {
-      result = CertWriteDatabase(dbPath);
-    }
-
- err:
-  for (i = 0; i < CERT_DATABASE_ITEM_MAX; i++)
-    if (NULL != row[i])
-      free(row[i]);
-
-  return result;
+    return result;
 }
 
+
+CertReturnCode CertCreateDatabaseItem(const X509 *x509, const char *file_name, int sn, CertStatus status)
+{
+    char db_path[MAX_CERT_PATH];
+    CertReturnCode result;
+
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, db_path, sizeof(db_path));
+
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    return CertCreateDatabaseItemDirect(db_path, x509, file_name, sn, status);
+}
 
 
 /*****************************************************************************/
@@ -655,90 +669,105 @@ CertReturnCode_t CertCreateDatabaseItem(X509 *x509, char *name, int32_t serial, 
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertUpdateDatabaseItem(char *dbName,
-                                        int32_t serialNb,
-                                        CertDbItemProperty_t property,
-                                        const char *value)
+CertReturnCode CertUpdateDatabaseItemDirect(const char *db_path, int sn, CertDbItemProperty property, const char *value)
 {
-  CA_DB *db;
-  char dbPath[MAX_CERT_PATH];
-  int32_t update = 0;
-  CertReturnCode_t result;
+    CA_DB *db;
+    char *record[CERT_DATABASE_ITEM_MAX];
+    char serial_str[(sizeof(sn) * 2) + 1]; /* Amount of hex digits (digit == nibble) + NUL character */
+    CertReturnCode result = CERT_GENERAL_FAILURE;
 
-  result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
-                                    dbPath, MAX_CERT_PATH);
-  if (CERT_OK != result)
-    return result;
-
-  result = CertReadDatabase(dbPath);
-  if (CERT_OK != result)
-    return result;
-
-  if (NULL != (db = CertLockDatabase(6)))
+    if (value == NULL)
     {
-      char **pp = NULL;
-      int32_t i;
+        return CERT_INVALID_ARG;
+    }
 
-      for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++)
-		{
-          int32_t dbSerialNb;
+    result = CertReadDatabase(db_path);
 
-          pp = (char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
+    if (result != CERT_OK)
+    {
+        return result;
+    }
 
-          sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb);
-          if (dbSerialNb == serialNb)
-            {
-              break;
-            }
-          else
-            {
-              pp = NULL;
-            }
-        }
+    db = CertLockDatabase(6);
 
-      if (NULL != pp)
+    if (db == NULL)
+    {
+        return CERT_DATABASE_LOCKED;
+    }
+
+    sprintf(serial_str, "%04x", sn);
+    memset(record, 0, sizeof(record));
+    record[CERT_DATABASE_ITEM_SERIAL] = serial_str;
+
+    char **pp = TXT_DB_get_by_index(db->db, CERT_DATABASE_ITEM_SERIAL, record);
+
+    if (pp == NULL)
+    {
+        result = CERT_DATABASE_ITEM_NOT_FOUND;
+        goto cleanup;
+    }
+
+    switch (property)
+    {
+    case CERT_DATABASE_ITEM_STATUS:
         {
-          switch (property)
+            CertStatus status = getCertStatusByString(value);
+
+            if (status == CERT_STATUS_UNDEFINED)
             {
-            case CERT_DATABASE_ITEM_STATUS:
-              strncpy(pp[CERT_DATABASE_ITEM_STATUS],
-                      value, 1);
-              pp[CERT_DATABASE_ITEM_STATUS][1] = '\0';
-              update = 1;
-              break;
-
-            case CERT_DATABASE_ITEM_EXPIRATION:
-            case CERT_DATABASE_ITEM_START:
-            case CERT_DATABASE_ITEM_NAME:
-              fprintf(stdout,
-                      "%s:This property probably shouldn't be changed %d\n",
-                      __FUNCTION__, property);
-              result = CERT_CANNOT_UPDATE_PROPERTY;
-              break;
-
-            case CERT_DATABASE_ITEM_SERIAL:
-            case CERT_DATABASE_ITEM_FILE:
-              fprintf(stdout, "UNIMPLEMENTED property in %s\n", __FUNCTION__);
-              result = CERT_PROPERTY_STRING_NOT_FOUND;
-              break;
-
-            default:
-              result = CERT_UNKNOWN_PROPERTY;
-              break;
+                result = CERT_INVALID_ARG;
+            }
+            else
+            {
+                strcpy(pp[CERT_DATABASE_ITEM_STATUS], value);
+                result = CERT_OK;
             }
         }
-      CertUnlockDatabase();
-    }
-  else
-    {
-      result = CERT_DATABASE_LOCKED;
+
+        break;
+
+    case CERT_DATABASE_ITEM_EXPIRATION:
+    case CERT_DATABASE_ITEM_START:
+    case CERT_DATABASE_ITEM_NAME:
+        DPRINTF("%s:This property probably shouldn't be changed %d\n", __FUNCTION__, property);
+        result = CERT_CANNOT_UPDATE_PROPERTY;
+        break;
+
+    case CERT_DATABASE_ITEM_SERIAL:
+    case CERT_DATABASE_ITEM_FILE:
+        DPRINTF("UNIMPLEMENTED property in %s\n", __FUNCTION__);
+        result = CERT_PROPERTY_STRING_NOT_FOUND;
+        break;
+
+    default:
+        result = CERT_UNKNOWN_PROPERTY;
+        break;
     }
 
-  if ((CERT_OK == result) && update)
+cleanup:
+    CertUnlockDatabase();
+
+    if (result == CERT_OK)
     {
-      result = CertWriteDatabase(dbPath);
+        result = CertWriteDatabase(NULL);
     }
-  return result;
+
+    return result;
+}
+
+CertReturnCode CertUpdateDatabaseItem(int sn, CertDbItemProperty property, const char *value)
+{
+    char db_path[MAX_CERT_PATH];
+    CertReturnCode result;
+
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, db_path, sizeof(db_path));
+
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    return CertUpdateDatabaseItemDirect(db_path, sn, property, value);
 }
 
 
@@ -757,48 +786,87 @@ CertReturnCode_t CertUpdateDatabaseItem(char *dbName,
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertDatabaseCountCertsDirect(char        *dbName,
-                                              CertStatus_t certStatus,
-                                              int32_t     *certNb)
+CertReturnCode CertDatabaseCountCertsDirect(const char *db_path, CertStatus status, int *o_ncerts)
 {
-  int32_t size = 0;
-  int32_t i;
-  CA_DB *db;
-  CertReturnCode_t result;
-
-  if (CERT_STATUS_UNDEFINED <= certStatus)
-    return CERT_UNKNOWN_PROPERTY;
-
-  result = CertReadDatabase(dbName);
-  if (CERT_OK != result)
-    return result;
-
-  if (NULL != (db = CertLockDatabase(7)))
+    if (o_ncerts == NULL)
     {
-      int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
-      for (i = 0, size = 0; i < nCertsTotal; i++)
+        return CERT_NULL_BUFFER;
+    }
+
+    switch (status)
+    {
+    case CERT_STATUS_ALL:
+        return CertGetDatabaseInfo(CERT_DATABASE_SIZE, o_ncerts);
+
+    case CERT_STATUS_VALID_CA:
+    case CERT_STATUS_TRUSTED_SERVER_CA:
+    case CERT_STATUS_EXPIRED:
+    case CERT_STATUS_VALID_PEER:
+    case CERT_STATUS_TRUSTED_PEER:
+    case CERT_STATUS_REVOKED:
+    case CERT_STATUS_SUSPENDED:
+    case CERT_STATUS_TRUSTED_CLIENT_CA:
+    case CERT_STATUS_VALID_CERT:
+    case CERT_STATUS_USER_CERTIFICATE:
+    case CERT_STATUS_WARNING:
+    case CERT_STATUS_UNKNOWN:
         {
-          const char **pp;
+            CA_DB *db;
+            int i, size, ncerts;
+            CertReturnCode result;
 
-          pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
-          if ((CERT_STATUS_ALL == certStatus)  ||
-              (pp[CERT_DATABASE_ITEM_STATUS][0] == statusValues[certStatus]))
+            result = CertReadDatabase(db_path);
+
+            if (result != CERT_OK)
             {
-              size++;
+                return result;
             }
+
+            db = CertLockDatabase(7);
+
+            if (db == NULL)
+            {
+                return CERT_DATABASE_LOCKED;
+            }
+
+            size = sk_OPENSSL_PSTRING_num(db->db->data);
+
+            for (i = 0, ncerts = 0; i < size; ++i)
+            {
+                const char **pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
+
+                if (getCertStatusByString(pp[CERT_DATABASE_ITEM_STATUS]) == status)
+                {
+                    ++ncerts;
+                }
+            }
+
+            CertUnlockDatabase();
+            *o_ncerts = ncerts;
+
+            return CERT_OK;
         }
+
+    case CERT_STATUS_UNDEFINED:
+    default:
+        return CERT_UNKNOWN_PROPERTY;
     }
-  else
-    {
-      result = CERT_DATABASE_LOCKED;
-    }
-  CertUnlockDatabase();
-  *certNb = size;
-  return result;
 }
 
+CertReturnCode CertDatabaseCountCerts(CertStatus status, int *o_ncerts)
+{
+    char db_path[MAX_CERT_PATH];
+    CertReturnCode result;
 
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, db_path, sizeof(db_path));
 
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    return CertDatabaseCountCertsDirect(db_path, status, o_ncerts);
+}
 
 
 /*****************************************************************************/
@@ -821,100 +889,76 @@ CertReturnCode_t CertDatabaseCountCertsDirect(char        *dbName,
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertListDatabaseCertsByStatusDirect(char *dbName,
-                                                     CertStatus_t certStatus,
-                                                     int32_t *certList,
-                                                     int32_t *certNb)
+CertReturnCode CertListDatabaseCertsByStatusDirect(const char *db_path, CertStatus status, int *o_list, int *io_ncerts)
 {
-  int32_t size = 0;
-  int32_t i;
-  CA_DB *db;
-  CertReturnCode_t result;
+    CA_DB *db;
+    int i, size, ncerts;
+    CertReturnCode result;
 
-  if (CERT_STATUS_UNDEFINED <= certStatus)
-    return CERT_UNKNOWN_PROPERTY;
-
-  result = CertReadDatabase(dbName);
-  if (CERT_OK != result)
-    return result;
-
-  if (NULL != (db = CertLockDatabase(7)))
+    if ((o_list == NULL) || (io_ncerts == NULL) || (*io_ncerts < 0))
     {
-      int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
-      for (i = 0, size = 0; i < nCertsTotal; i++)
+        return CERT_NULL_BUFFER;
+    }
+
+    if ((status < 0) || (status >= CERT_STATUS_UNDEFINED))
+    {
+        return CERT_UNKNOWN_PROPERTY;
+    }
+
+    result = CertReadDatabase(db_path);
+
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    db = CertLockDatabase(8);
+
+    if (db == NULL)
+    {
+        return CERT_DATABASE_LOCKED;
+    }
+
+    size = sk_OPENSSL_PSTRING_num(db->db->data);
+
+    for (i = 0, ncerts = 0; (ncerts < *io_ncerts) && (i < size); ++i)
+    {
+        const char **pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
+
+        if ((status == CERT_STATUS_ALL) ||
+            (getCertStatusByString(pp[CERT_DATABASE_ITEM_STATUS]) == status))
         {
-          const char **pp;
-
-          pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
-          if ((CERT_STATUS_ALL == certStatus)  ||
-              (pp[CERT_DATABASE_ITEM_STATUS][0] == statusValues[certStatus]))
-            {
-              //              fprintf(stdout, "captured serial #%s\n",
-              //      pp[CERT_DATABASE_ITEM_SERIAL]);
-              sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &(certList[i]));
-
-              if (size == *certNb)
-                {
-                  result = CERT_INSUFFICIENT_BUFFER_SPACE;
-                  break;
-                }
-              size++;
-            }
+            sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &o_list[i]);
+            ++ncerts;
         }
     }
-  else
+
+    CertUnlockDatabase();
+
+    if (ncerts >= *io_ncerts)
     {
-      result = CERT_DATABASE_LOCKED;
+        return CERT_INSUFFICIENT_BUFFER_SPACE;
     }
-  CertUnlockDatabase();
-  *certNb = size;
-  return result;
+
+    *io_ncerts = ncerts;
+
+    return CERT_OK;
 }
 
-
-
-
-/*****************************************************************************/
-/*                                                                           */
-/* FUNCTION: CertListDatabaseCertsByStatusDirect                             */
-/*      Return a list of certificates filtered by status from the default    */
-/*           database                                                        */
-/* INPUT:                                                                    */
-/*      dbName: the file containing the desired database                     */
-/*      certStatus: the filter for listing                                   */
-/*      certNb: the number of certificates possible in the array             */
-/* OUTPUT:                                                                   */
-/*      certList: an array of certificate serial numbers that match          */
-/* RETURN:                                                                   */
-/*      CERT_OK if the database was successfully read and deciphered         */
-/*      CERT_UNKNOWN_PROPERTY if the status filter is undefined              */
-/*      CERT_INSUFFICIENT_BUFFER_SPACE if there are too many certificates    */
-/*         that match the filter for the array                               */
-/*      CERT_DATABASE_LOCKED if the lock file has been aquired by another    */
-/* NOTES:                                                                    */
-/*                                                                           */
-/*****************************************************************************/
-
-CertReturnCode_t CertListDatabaseCertsByStatus(CertStatus_t certStatus,
-                                               int32_t *certList,
-                                               int32_t *certNb)
+CertReturnCode CertListDatabaseCertsByStatus(CertStatus status, int *o_list, int *io_ncerts)
 {
-  CertReturnCode_t result;
-  char dbName[MAX_CERT_PATH];
+    char db_path[MAX_CERT_PATH];
+    CertReturnCode result;
 
-  result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
-                                    dbName, MAX_CERT_PATH);
-  if (CERT_OK == result)
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, db_path, sizeof(db_path));
+
+    if (result != CERT_OK)
     {
-      result = CertListDatabaseCertsByStatusDirect(dbName,
-                                                   certStatus,
-                                                   certList,
-                                                   certNb);
+        return result;
     }
 
-  return result;
+    return CertListDatabaseCertsByStatusDirect(db_path, status, o_list, io_ncerts);
 }
-
 
 /*****************************************************************************/
 /*                                                                           */
@@ -926,55 +970,63 @@ CertReturnCode_t CertListDatabaseCertsByStatus(CertStatus_t certStatus,
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
-                                                   int32_t serialNb,
-                                                   char   *buf,
-                                                   int     bufLen)
+CertReturnCode CertGetNameFromSerialNumberDirect(const char *db_path, int sn, char *o_buf, int len)
 {
-  int32_t size;
-  int32_t i;
-  CA_DB *db;
-  CertReturnCode_t result;
-  result = CertReadDatabase(dbName);
-  if (CERT_OK != result)
-    return result;
+    int i, size;
+    CA_DB *db;
+    char serial_str[(sizeof(sn) * 2) + 1]; /* Amount of hex digits (digit == nibble) + NUL character */
+    CertReturnCode result = CERT_DATABASE_ITEM_NOT_FOUND;
 
-  if (NULL != (db = CertLockDatabase(7)))
+    if (o_buf == NULL)
     {
-      int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
+        return CERT_NULL_BUFFER;
+    }
 
-      for (i = 0, size = 0; i < nCertsTotal; i++)
-		{
-          int dbSerialNb;
-          const char **pp;
+    if (len <= 0)
+    {
+        return CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
 
-          pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
-          sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb);
+    result = CertReadDatabase(db_path);
 
-          if (dbSerialNb == serialNb)
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    db = CertLockDatabase(9);
+
+    if (db == NULL)
+    {
+        return CERT_DATABASE_LOCKED;
+    }
+
+    sprintf(serial_str, "%04x", sn);
+
+    size = sk_OPENSSL_PSTRING_num(db->db->data);
+
+    for (i = 0; i < size; ++i)
+    {
+        const char **pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
+
+        if (strcmp(pp[CERT_DATABASE_ITEM_SERIAL], serial_str) == 0)
+        {
+            if (snprintf(o_buf, len, "%s", pp[CERT_DATABASE_ITEM_FILE]) >= len)
             {
-              int len;
-              //              fprintf(stdout, "captured serial #%s\n",
-              //      pp[CERT_DATABASE_ITEM_SERIAL]);
-
-              if ((len = strlen(pp[CERT_DATABASE_ITEM_FILE])) >= bufLen)
-                {
-                  result = CERT_INSUFFICIENT_BUFFER_SPACE;
-                }
-              else
-                {
-                  memcpy(buf, pp[CERT_DATABASE_ITEM_FILE], len + 1);
-                  break;
-                }
+                result = CERT_INSUFFICIENT_BUFFER_SPACE;
             }
+            else
+            {
+                result = CERT_OK;
+            }
+
+            break;
         }
-      CertUnlockDatabase();
     }
-  else
-    {
-      result = CERT_DATABASE_LOCKED;
-    }
-  return result;
+
+    CertUnlockDatabase();
+
+    return result;
 }
 
 /*****************************************************************************/
@@ -987,385 +1039,355 @@ CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
 /*                                                                           */
 /*****************************************************************************/
 
-CertReturnCode_t CertGetNameFromSerialNumber(int32_t serialNb,
-                                             char   *buf,
-                                             int     bufLen)
+CertReturnCode CertGetNameFromSerialNumber(int sn, char *o_buf, int len)
 {
-  CertReturnCode_t result;
-  char filename[MAX_CERT_PATH];
+    char db_path[MAX_CERT_PATH];
+    CertReturnCode result;
 
-  result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
-                                    filename, MAX_CERT_PATH);
-  if (CERT_OK != result)
+    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE, db_path, sizeof(db_path));
+
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    return CertGetNameFromSerialNumberDirect(db_path, sn, o_buf, len);
+}
+
+const char* CertGetStatusString(CertStatus status)
+{
+    static const char status_strs[][2] =
+    {
+#   define CM_VAL(status, val) { val, '\0' }
+        CERTMGR_ITEM_STATUSES
+#   undef CM_VAL
+    };
+
+    if ((status < 0) || (status >= CERT_STATUS_UNDEFINED))
+    {
+        return NULL;
+    }
+
+    return status_strs[status];
+}
+
+static CertStatus getCertStatusByString(const char *status)
+{
+    int i;
+
+    static const char status_strs[][2] =
+    {
+#   define CM_VAL(status, val) { val, '\0' }
+        CERTMGR_ITEM_STATUSES
+#   undef CM_VAL
+    };
+
+    if (status != NULL)
+    {
+        for (i = 0; i < CERT_STATUS_UNDEFINED; ++i)
+        {
+            if (strcmp(status, status_strs[i]) == 0)
+            {
+                return (CertStatus)i;
+            }
+        }
+    }
+
+    return CERT_STATUS_UNDEFINED;
+}
+
+static CertReturnCode cmdb_TXT_DB_read(FILE *fp, int num)
+{
+    /* FIXME: Implement! */
+    return CERT_GENERAL_FAILURE;
+}
+
+static int cmdb_TXT_DB_write(FILE *fp, TXT_DB *db)
+{
+    /* For reasons unknown to me, someone over at Palm decided it was better to
+     * copy the entire TXT_DB_write function from OpenSSL than to just use it.
+     * I decided that while we're at it it'd be better if we do it in a more
+     * efficient way, so I rewrote it to not use dynamic memory allocation at
+     * all (except what stdio already allocates, that is).
+     * This code should also (in theory) be more readable. */
+    long record_idx;
+    long nrecords = sk_OPENSSL_PSTRING_num(db->data);
+    long nfields = db->num_fields;
+
+    for (record_idx = 0; record_idx < nrecords; ++record_idx)
+    {
+        long field_idx;
+        const char **record = (const char **)sk_OPENSSL_PSTRING_value(db->data, record_idx);
+
+        for (field_idx = 0; field_idx < nfields; ++field_idx)
+        {
+            const char *field = record[field_idx];
+
+            /* Append TAB separator after each field */
+            if (field_idx > 0)
+            {
+                fputc('\t', fp);
+            }
+
+            if ((field != NULL) && (*field != '\0'))
+            {
+                char tmpbuf[MAX_CERT_PATH];
+
+                do /* while (*field != '\0') */
+                {
+                    size_t written_bytes = 0;
+
+                    do /* while ((*field != '\0') && (written_bytes < sizeof(tmpbuf))) */
+                    {
+                        switch (*field)
+                        {
+                        /* We use TAB as field separator and LF as record separator,
+                         * so we need to distinguish between literals and separators.
+                         * We do that by prepending a backslash ('\\') before each
+                         * literal TAB or LF character. Note that OpenSSL's implementation
+                         * doesn't handle LF literals, so this version is at least
+                         * better in that aspect */
+                        case '\t':
+                        case '\n':
+                            tmpbuf[written_bytes++] = '\\';
+
+                        default:
+                            tmpbuf[written_bytes++] = *field;
+                        }
+
+                        ++field;
+                    } while ((*field != '\0') && (written_bytes < sizeof(tmpbuf)));
+
+                    if (fwrite(tmpbuf, written_bytes, 1, fp) <= 0)
+                    {
+                        return CERT_GENERAL_FAILURE;
+                    }
+                } while (*field != '\0');
+            }
+
+            /* Append a new line after each record */
+            if (fputc('\n', fp) != '\n')
+            {
+                return CERT_GENERAL_FAILURE;
+            }
+        }
+    }
+
+    return CERT_OK;
+}
+
+static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr)
+{
+    FILE *db_file;
+    long errorline = -1;
+    CA_DB *retdb = NULL;
+    TXT_DB *tmpdb = NULL;
+    CONF *dbattr_conf = NULL;
+    CertReturnCode result;
+    char attrfilename[MAX_CERT_PATH];
+
+    if (db_path == NULL)
+    {
+        goto done;
+    }
+
+    if (snprintf(attrfilename, sizeof(attrfilename), "%s.attr", db_path) >= (int)sizeof(attrfilename))
+    {
+        goto done;
+    }
+
+    db_file = fopen(db_path, "r");
+
+    if (db_file == NULL)
+    {
+        DPRINTF("load_index: %s\n", strerror(errno));
+        goto done;
+    }
+
+    result = cmdb_TXT_DB_read(db_file, CERT_DATABASE_ITEM_MAX);
+    fclose(db_file);
+
+    if (result != CERT_OK)
+    {
+        goto done;
+    }
+
+    dbattr_conf = NCONF_new(NULL);
+
+    if ((dbattr_conf != NULL) &&
+        (NCONF_load(dbattr_conf, attrfilename, &errorline) <= 0))
+    {
+        if (errorline > 0)
+        {
+            goto cleanup;
+        }
+
+        NCONF_free(dbattr_conf);
+        dbattr_conf = NULL;
+    }
+
+    retdb = (CA_DB *)OPENSSL_malloc(sizeof(CA_DB));
+
+    if (retdb == NULL)
+    {
+        DPRINTF("Out of memory\n");
+        result = CERT_MEMORY_ERROR;
+        goto cleanup;
+    }
+
+    retdb->db = tmpdb;
+    tmpdb = NULL;
+
+    if (db_attr != NULL)
+    {
+        retdb->attributes = *db_attr;
+    }
+    else if (dbattr_conf != NULL)
+    {
+        retdb->attributes.unique_subject =
+            parse_yesno(NCONF_get_string(dbattr_conf, NULL, "unique_subject"), 1);
+    }
+    else
+    {
+        retdb->attributes.unique_subject = 1;
+    }
+
+
+cleanup:
+    if (dbattr_conf)
+    {
+        NCONF_free(dbattr_conf);
+    }
+
+    if (tmpdb)
+    {
+        TXT_DB_free(tmpdb);
+    }
+
+done:
+    return retdb;
+}
+
+static CertReturnCode save_index(const char *db_path, CA_DB *db)
+{
+    int fd;
+    FILE *db_file, *attr_file;
+    char filename[MAX_CERT_PATH];
+    char attrfilename[MAX_CERT_PATH];
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+
+    if (snprintf(attrfilename, sizeof(attrfilename), "%s.attr", db_path) >= (int)sizeof(attrfilename))
+    {
+        return CERT_PATH_LIMIT_EXCEEDED;
+    }
+
+    /* We already checked that the largest string fits nicely, so we
+     * can run with sprintf without worries about buffer overruns */
+    sprintf(filename, "%s", db_path);
+
+    /* Open with `open` first to truncate the file while also
+     * creating it if it doesn't exists */
+    fd = open(filename, O_TRUNC | O_WRONLY);
+
+    if (fd < 0)
+    {
+        return CERT_OPEN_FILE_FAILED;
+    }
+
+    /* Reopen with `fopen` to get buffering and other goodies */
+    db_file = fdopen(fd, "w");
+
+    if (db_file == NULL)
+    {
+        DPRINTF("unable to open '%s'\n", filename);
+        result = CERT_OPEN_FILE_FAILED;
+        goto error;
+    }
+
+    result = cmdb_TXT_DB_write(db_file, db->db);
+    fclose(db_file);
+
+    if (result != CERT_OK)
+    {
+        return result;
+    }
+
+    /* Same as with the DB file -- we need truncation */
+    fd = open(attrfilename, O_TRUNC | O_WRONLY);
+
+    if (fd < 0)
+    {
+        return CERT_OPEN_FILE_FAILED;
+    }
+
+    attr_file = fopen(attrfilename, "w");
+
+    if (attr_file == NULL)
+    {
+        DPRINTF("unable to open '%s'\n", attrfilename);
+        result = CERT_OPEN_FILE_FAILED;
+        goto error;
+    }
+
+    if (fprintf(attr_file,
+                "unique_subject = %s\n",
+                db->attributes.unique_subject ? "yes" : "no") > 0)
+    {
+        result = CERT_OK;
+    }
+
+    fclose(attr_file);
+
+done:
     return result;
 
-#if 0
-  result = makePath(filename, CERTCFG_CERT_DATABASE, database, MAX_CERT_PATH);
-  if (CERT_OK != result)
-    return result;
-#endif
-
-  result = CertGetNameFromSerialNumberDirect(filename, serialNb, buf, bufLen);
-
-  return result;
+error:
+    close(fd);
+    goto done;
 }
 
-
-long MY_TXT_DB_write(BIO *out, TXT_DB *db)
+static int parse_yesno(const char *str, int def)
 {
-  long i, j, n, nn, l, tot=0;
-  char *p, **pp, *f;
-  BUF_MEM *buf = NULL;
-  long ret = -1;
+    int ret = !!def;
 
-  if ((buf = BUF_MEM_new()) == NULL)
-    goto err;
-
-  n = sk_OPENSSL_PSTRING_num(db->data);
-  nn = db->num_fields;
-  for (i = 0; i < n; i++)
+    if (str)
     {
-      pp=(char **)sk_OPENSSL_PSTRING_value(db->data, i);
-
-      l = 0;
-      for (j = 0; j < nn; j++)
+        switch (*str)
         {
-          if (pp[j] != NULL)
-            l += strlen(pp[j]);
-        }
-      if (!BUF_MEM_grow_clean(buf,(int)(l * 2 + nn)))
-        goto err;
+        case 'f': /* false */
+        case 'F': /* FALSE */
+        case 'n': /* no */
+        case 'N': /* NO */
+        case '0': /* 0 */
+            ret = 0;
+            break;
 
-      p = buf->data;
-      for (j = 0; j < nn; j++)
-        {
-          f = pp[j];
-          if (f != NULL)
-            for (;;)
-              {
-                if (*f == '\0') break;
-                if (*f == '\t') *(p++)='\\';
-                *(p++)= *(f++);
-              }
-          *(p++) = '\t';
+        case 't': /* true */
+        case 'T': /* TRUE */
+        case 'y': /* yes */
+        case 'Y': /* YES */
+        case '1': /* 1 */
+            ret = 1;
+            break;
+
+        default:
+            break;
         }
-      p[-1] = '\n';
-      j = p-buf->data;
-      if (BIO_write(out, buf->data, (int)j) != j)
-        goto err;
-      tot += j;
     }
-  ret = tot;
- err:
-  if (buf != NULL)
-    BUF_MEM_free(buf);
 
-  return(ret);
+    return ret;
 }
 
-CA_DB *load_index(char *dbfile, DB_ATTR *db_attr)
+static void* OPENSSL_malloc_wrap(size_t sz)
 {
-  CA_DB *retdb = NULL;
-  TXT_DB *tmpdb = NULL;
-  BIO *in = BIO_new(BIO_s_file());
-  CONF *dbattr_conf = NULL;
-  char buf[1][MAX_CERT_PATH];
-  long errorline= -1;
-
-  if (in == NULL)
-    {
-      goto err;
-    }
-  if (BIO_read_filename(in, dbfile) <= 0)
-    {
-      perror(dbfile);
-      goto err;
-    }
-  if ((tmpdb = TXT_DB_read(in, DB_NUMBER)) == NULL)
-    {
-      goto err;
-    }
-
-  BIO_snprintf(buf[0], sizeof buf[0], "%s.attr", dbfile);
-  dbattr_conf = NCONF_new(NULL);
-
-  if (0 >= NCONF_load(dbattr_conf,buf[0], &errorline))
-    {
-      if (errorline > 0)
-        {
-          goto err;
-        }
-      else
-        {
-          NCONF_free(dbattr_conf);
-          dbattr_conf = NULL;
-        }
-    }
-
-  if ((retdb = OPENSSL_malloc(sizeof(CA_DB))) == NULL)
-    {
-      fprintf(stderr, "Out of memory\n");
-      goto err;
-    }
-
-  retdb->db = tmpdb;
-  tmpdb = NULL;
-  if (db_attr)
-    retdb->attributes = *db_attr;
-  else
-    {
-      retdb->attributes.unique_subject = 1;
-    }
-
-  if (dbattr_conf)
-    {
-      char *p = NCONF_get_string(dbattr_conf,NULL,"unique_subject");
-      if (p)
-        {
-          retdb->attributes.unique_subject = parse_yesno(p,1);
-        }
-    }
-
- err:
-  if (dbattr_conf)
-    NCONF_free(dbattr_conf);
-  if (tmpdb)
-    TXT_DB_free(tmpdb);
-  if (in)
-    BIO_free_all(in);
-
-  return retdb;
+    /**
+     * A dirty and ugly hack allowing cmutils_memdup to
+     * work with OPENSSL_malloc which is defined as a macro that
+     * expands to a function call with two additional parameters.
+     */
+    return OPENSSL_malloc(sz);
 }
 
-int save_index(const char *dbfile, const char *suffix, CA_DB *db)
-	{
-	char buf[3][MAX_CERT_PATH];
-	BIO *out = BIO_new(BIO_s_file());
-	int j;
-
-	if (out == NULL)
-		{
-
-		goto err;
-		}
-
-	j = strlen(dbfile) + strlen(suffix);
-	if (j + 6 >= MAX_CERT_PATH)
-		{
-		fprintf(stderr,"file name too long\n");
-		goto err;
-		}
-
-	j = BIO_snprintf(buf[2], sizeof buf[2], "%s.attr", dbfile);
-	j = BIO_snprintf(buf[1], sizeof buf[1], "%s.attr.%s", dbfile, suffix);
-	j = BIO_snprintf(buf[0], sizeof buf[0], "%s.%s", dbfile, suffix);
-
-	fprintf(stderr, "DEBUG: writing \"%s\"\n", buf[0]);
-
-	if (BIO_write_filename(out,buf[0]) <= 0)
-		{
-		perror(dbfile);
-		fprintf(stderr,"unable to open '%s'\n", dbfile);
-		goto err;
-		}
-	j=MY_TXT_DB_write(out,db->db);
-	if (j <= 0) goto err;
-
-	BIO_free(out);
-
-	out = BIO_new(BIO_s_file());
-
-	fprintf(stderr, "DEBUG: writing \"%s\"\n", buf[1]);
-
-	if (BIO_write_filename(out,buf[1]) <= 0)
-		{
-		perror(buf[2]);
-		fprintf(stderr,"unable to open '%s'\n", buf[2]);
-		goto err;
-		}
-	BIO_printf(out,"unique_subject = %s\n",
-		db->attributes.unique_subject ? "yes" : "no");
-	BIO_free(out);
-
-	return 1;
- err:
-	return 0;
-	}
-
-
-
-int rotate_index(const char *dbfile, const char *new_suffix, const char *old_suffix)
-{
-  char buf[5][MAX_CERT_PATH];
-  int i,j;
-  struct stat sb;
-
-  i = strlen(dbfile) + strlen(old_suffix);
-  j = strlen(dbfile) + strlen(new_suffix);
-  if (i > j)
-    j = i;
-  if (j + 6 >= MAX_CERT_PATH)
-    {
-      fprintf(stderr,"file name too long\n");
-      goto err;
-    }
-
-  j = BIO_snprintf(buf[4], sizeof buf[4], "%s.attr", dbfile);
-  j = BIO_snprintf(buf[2], sizeof buf[2], "%s.attr.%s",
-                   dbfile, new_suffix);
-  j = BIO_snprintf(buf[0], sizeof buf[0], "%s.%s",
-                   dbfile, new_suffix);
-  j = BIO_snprintf(buf[1], sizeof buf[1], "%s.%s",
-                   dbfile, old_suffix);
-  j = BIO_snprintf(buf[3], sizeof buf[3], "%s.attr.%s",
-                   dbfile, old_suffix);
-  if (stat(dbfile,&sb) < 0)
-    {
-      if (errno != ENOENT
-#ifdef ENOTDIR
-          && errno != ENOTDIR
-#endif
-          )
-        goto err;
-    }
-  else
-    {
-      fprintf(stderr, "DEBUG: renaming \"%s\" to \"%s\"\n",
-              dbfile, buf[1]);
-      if (rename(dbfile,buf[1]) < 0)
-        {
-          fprintf(stderr,
-                  "unable to rename %s to %s\n",
-                  dbfile, buf[1]);
-          perror("reason");
-          goto err;
-        }
-    }
-  fprintf(stderr, "DEBUG: renaming \"%s\" to \"%s\"\n",
-          buf[0],dbfile);
-  if (rename(buf[0],dbfile) < 0)
-    {
-      fprintf(stderr,
-              "unable to rename %s to %s\n",
-              buf[0],dbfile);
-      perror("reason");
-      if (rename(buf[1],dbfile) < 0)
-      {
-        fprintf(stderr,
-                "unable to rename %s to %s\n",
-                buf[1],dbfile);
-        perror("reason");
-      }
-      goto err;
-    }
-  if (stat(buf[4],&sb) < 0)
-    {
-      if (errno != ENOENT
-#ifdef ENOTDIR
-          && errno != ENOTDIR
-#endif
-          )
-        goto err;
-    }
-  else
-    {
-      fprintf(stderr, "DEBUG: renaming \"%s\" to \"%s\"\n",
-              buf[4],buf[3]);
-      if (rename(buf[4],buf[3]) < 0)
-        {
-          fprintf(stderr,
-                  "unable to rename %s to %s\n",
-                  buf[4], buf[3]);
-          perror("reason");
-          if (rename(dbfile,buf[0]) < 0)
-            {
-              fprintf(stderr,
-                      "unable to rename %s to %s\n",
-                      dbfile, buf[0]);
-              perror("reason");
-            }
-          if (rename(buf[1],dbfile) < 0)
-            {
-              fprintf(stderr,
-                      "unable to rename %s to %s\n",
-                      buf[1], dbfile);
-              perror("reason");
-            }
-          goto err;
-        }
-    }
-#ifdef RL_DEBUG
-  fprintf(stderr, "DEBUG: renaming \"%s\" to \"%s\"\n",
-          buf[2],buf[4]);
-#endif
-  if (rename(buf[2],buf[4]) < 0)
-    {
-      fprintf(stderr,
-              "unable to rename %s to %s\n",
-              buf[2],buf[4]);
-      perror("reason");
-      if (rename(buf[3],buf[4]) < 0)
-        {
-           fprintf(stderr,
-                "unable to rename %s to %s\n",
-                buf[3],buf[4]);
-           perror("reason");
-        }
-      if (rename(dbfile,buf[0]) < 0)
-        {
-          fprintf(stderr,
-                  "unable to rename %s to %s\n",
-                  dbfile,buf[0]);
-          perror("reason");
-        }
-      if (rename(buf[1],dbfile) < 0)
-        {
-          fprintf(stderr,
-                  "unable to rename %s to %s\n",
-                  buf[1],dbfile);
-          perror("reason");
-        }
-      goto err;
-    }
-  return 1;
- err:
-  return 0;
+#ifdef __cplusplus
 }
-
-void free_index(CA_DB *db)
-	{
-	if (db)
-		{
-		if (db->db) TXT_DB_free(db->db);
-		OPENSSL_free(db);
-		}
-	}
-
-int parse_yesno(const char *str, int def)
-	{
-	int ret = def;
-	if (str)
-		{
-		switch (*str)
-			{
-		case 'f': /* false */
-		case 'F': /* FALSE */
-		case 'n': /* no */
-		case 'N': /* NO */
-		case '0': /* 0 */
-			ret = 0;
-			break;
-		case 't': /* true */
-		case 'T': /* TRUE */
-		case 'y': /* yes */
-		case 'Y': /* YES */
-		case '1': /* 1 */
-			ret = 0;
-			break;
-		default:
-			ret = def;
-			break;
-			}
-		}
-	return ret;
-	}
+#endif

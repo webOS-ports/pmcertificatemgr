@@ -28,36 +28,59 @@
 #include "cert_cfg.h"
 
 typedef enum
-  {
+{
     CERT_FILELOCK_SERIAL,
     CERT_FILELOCK_DATABASE,
-  } CertFileLock_t;
+} CertFileLock;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int getTimeString(ASN1_TIME* time_data, char* buf, int buflen);
-int CertGetSerialNumber(char *path);
-int CertGetSerialNumberInc(char *path, int increment);
-int CertLockFile(int fileType);
-int CertUnlockFile(int fileType);
-int CertInitLockFiles(char *rootDir);
-char *buildPath(int destDirType, int objectType);
-char *serialPathName(char *baseName, int destDirType, CertObject_t objectType, int serial);
-char *serialPathNameCount(char *baseName, int destDirType, CertObject_t objectType, int serial, int count);
-int checkCertDates(X509* cert);
-int getPrivKeyType(EVP_PKEY *pkey);
-char *fileBaseName(const char *pPath);
-CertReturnCode_t makePath(char *file,
-                          certcfg_Property_t fileType,
-                          char* path, int32_t len);
-CertReturnCode_t certSerialNumberToFileName(const int32_t serialNb,
-                                            char *buf,
-                                            int32_t bufLen);
+extern CertReturnCode cmutils_ip2str(const ASN1_OCTET_STRING *ip, char *o_buf, size_t buf_len);
+
+extern CertReturnCode cmutils_strdsvcat(char *o_dst, size_t dst_size, const char *src, char delim);
+
+extern CertReturnCode getTimeString(const ASN1_TIME *time_data, char *o_buf, int buflen);
+
+extern CertReturnCode checkCertDates(const X509 *cert);
+
+extern int CertGetSerialNumber(const char *path);
+
+extern int CertGetSerialNumberInc(const char *path, int increment);
+
+extern CertReturnCode CertInitLockFiles(void);
+
+extern int CertLockFile(CertFileLock lock_type);
+
+extern int CertUnlockFile(CertFileLock lock_type);
+
+extern char* getPathBySerial(const char *base_name, CertDestDir dst_dir_type, CertObject obj_type, int sn);
+
+extern char* getPathBySerialCtr(const char *base_name, CertDestDir dst_dir_type, CertObject obj_type, int sn, int count);
+
+extern char *fileBaseName(const char *path);
+
+extern CertObject getPrivKeyType(const EVP_PKEY *pkey);
+
+extern CertReturnCode makePath(const char *file, CertCfgProperty file_type, char *o_path, int len);
+
+extern CertReturnCode certSerialNumberToFileName(const int sn, char *o_buf, int len);
+
+extern int cmutils_mkdirp(const char *path);
+
+extern int cmutils_touchp(const char *path, const char *data);
+
+extern int cmutils_rmdeadlinks(const char *path, int recursive);
+
+extern int cmutils_exists(const char *path);
+
+extern int cmutils_gzip(const char *src_file, const char *out_file);
+
+extern void* cmutils_memdup(void *(*allocator)(size_t sz), const void *mem, int len, int added_mem);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif  // __CERT_UTILS_H__
+#endif  // !__CERT_UTILS_H__

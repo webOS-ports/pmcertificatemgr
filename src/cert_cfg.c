@@ -27,6 +27,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <openssl/conf.h>
 
@@ -38,29 +39,31 @@
 #include "cert_debug.h"
 
 
-/*
- * Currently just hold this stuff in globals.  This is not something we
+/* Currently just hold this stuff in globals.  This is not something we
  * want to continue into the future.
- * Wouldn't an actual object be nice!
- */
-typedef struct ConfigObject_t
+ * Wouldn't an actual object be nice! */
+typedef struct
 {
-  CONF *conf;
-  char *descStr[PROPERTY_MAX+2];
-} configObject_t;
+    CONF *conf;
+    char *desc_str[CERTCFG_MAX_PROPERTY];
+} CertConfigObject;
 
-configObject_t configObject;
-static int populateConfig(void);
+static CertReturnCode certcfg_populate_config(CONF *conf, const char *cfg_file, const char *cfg_name);
+static CertReturnCode certcfg_set_val(CertConfigObject *obj, CertCfgProperty property, const char *value);
 
 
+static CertConfigObject g_config = { NULL, { NULL } };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*****************************************************************************/
 /*                                                                           */
-/* FUNCTION: CertCfgOpenConfigFile                                          */
+/* FUNCTION: CertCfgOpenConfigFile                                           */
 /*       Open the configuration file                                         */
 /* INPUT:                                                                    */
-/*       configFile: a fully qualified path to the ssl configuration file    */
+/*       cfg_file: a fully qualified path to the ssl configuration file      */
 /* OUTPUT:                                                                   */
 /*       void                                                                */
 /* RETURN:                                                                   */
@@ -72,7 +75,7 @@ static int populateConfig(void);
 /*       CERT_UNDEFINED_DESTINATION: The certificate root dir not available  */
 /* NOTES:                                                                    */
 /*       1) Not thread safe                                                  */
-/*       2) If the value of configFile == NULL, the following are checked in */
+/*       2) If the value of cfg_file == NULL, the following are checked in   */
 /*          order:                                                           */
 /*            OPENSSL_CONF environmental variable                            */
 /*            CERT_DEF_CONF_FILE defined in cert_mgr.h                       */
@@ -81,123 +84,111 @@ static int populateConfig(void);
 /*       4) NCONF_load seems to indescriminatly open arbitrary files         */
 /*                                                                           */
 /*****************************************************************************/
- 
-int CertCfgOpenConfigFile(const char *configFile, const char *configName)
-{
-  const char *pConfigFile = configFile;
-  char *dirName;
-  long err = 0;
-  int len;
-  CONF *conf;
-  
-  if (NULL == pConfigFile)
-    {
-      // first check the environment
-      pConfigFile = getenv("OPENSSL_CONF");
-      
-      // if it didn't find it we'll use the default
-      if (NULL == pConfigFile)
-        pConfigFile = CERT_DEF_CONF_FILE;
-    }
-  
-  // keep a copy in case of error
-  CertCfgSetObjectStrValue(CERTCFG_CONFIG_FILE, pConfigFile);
-  
-  // make sure it's reasonable
-  
-  if (MAX_CERT_PATH <= (len = strlen(pConfigFile)))
-    {
-      return CERT_PATH_LIMIT_EXCEEDED;
-    }
-  conf = NCONF_new(NCONF_default());
-  if (!NCONF_load(conf, pConfigFile, &err))
-    {
-      if (err == 0)
-        {
-          PRINT_RETURN_CODE(CERT_OPEN_FILE_FAILED);
-          return CERT_OPEN_FILE_FAILED;
-        }
-      else
-        {
-          PRINT_RETURN_CODE(CERT_ILLFORMED_CONFIG_FILE);
-          return CERT_ILLFORMED_CONFIG_FILE;
-        }
-    }
-  
-  /* Figure out the configuration inside the designate file that we want 
-   * to use
-   */
-  if (NULL == configName)
-    {
-      if (!(configName = NCONF_get_string (conf, "ca", "default_ca")))
-        return CERT_CONFIG_UNAVAILABLE;
-    }
-  
-  
-  /*
-   * Let's find out if there is anything reasonable
-   */
-  if (!(dirName = NCONF_get_string (conf, configName, "dir")))
-    {
-      PRINT_RETURN_CODE(CERT_ILLFORMED_CONFIG_FILE);
-      err = CERT_ILLFORMED_CONFIG_FILE;
-    }
-  else
-    {
-      struct stat statBuf;
-      if (0 != stat(dirName, &statBuf))
-        {
-          fprintf(stdout, "Can't find %s\n", dirName);
-          err = CERT_UNDEFINED_ROOT_DIR;
-        }
-    }
-  
-  // Cache it away
-  CertCfgSetObjectStrValue(CERTCFG_CONFIG_NAME, (const char *)configName);
-  configObject.conf = conf;
-	
-  // Now resolve the rest of the defaults from the config file
-  // We are asuming that the file is well formed or this might have problems.
-  // if we can't resolve the directory then fail.
-  // if we can't resolve the subdirectories, don't fail put them under dir.
-	
-  populateConfig();
 
-  return err;
+CertReturnCode CertCfgOpenConfigFile(const char *cfg_file, const char *cfg_name)
+{
+    long err;
+    CONF *conf;
+    const char *dir_name;
+    CertReturnCode result;
+
+    /* First check the environment */
+    if ((cfg_file == NULL) &&
+        ((cfg_file = getenv("OPENSSL_CONF")) == NULL))
+    {
+        /* Use the default */
+        cfg_file = CERT_DEF_CONF_FILE;
+    }
+
+    /* Make sure it's reasonable */
+    if (strlen(cfg_file) >= MAX_CERT_PATH)
+    {
+        return CERT_PATH_LIMIT_EXCEEDED;
+    }
+
+    conf = NCONF_new(NCONF_default());
+
+    if (conf == NULL)
+    {
+        return CERT_GENERAL_FAILURE;
+    }
+
+    if (!NCONF_load(conf, cfg_file, &err))
+    {
+        if (err == 0)
+        {
+            PRINT_RETURN_CODE(CERT_OPEN_FILE_FAILED);
+            result = CERT_OPEN_FILE_FAILED;
+        }
+        else
+        {
+            PRINT_RETURN_CODE(CERT_ILLFORMED_CONFIG_FILE);
+            result = CERT_ILLFORMED_CONFIG_FILE;
+        }
+
+        goto error;
+    }
+
+    /* Figure out the configuration inside the designate file that we want
+     * to use */
+    if ((cfg_name == NULL) &&
+        ((cfg_name = NCONF_get_string(conf, "ca", "default_ca")) == NULL))
+    {
+        result = CERT_CONFIG_UNAVAILABLE;
+        goto error;
+    }
+
+    dir_name = NCONF_get_string(conf, cfg_name, "dir");
+
+    /* Let's find out if there is anything reasonable */
+    if (dir_name == NULL)
+    {
+        PRINT_RETURN_CODE(CERT_ILLFORMED_CONFIG_FILE);
+        result = CERT_ILLFORMED_CONFIG_FILE;
+        goto error;
+    }
+    else
+    {
+        struct stat stat_buf;
+
+        if (stat(dir_name, &stat_buf) != 0)
+        {
+            fprintf(stdout, "Can't find %s\n", dir_name);
+            result = CERT_UNDEFINED_ROOT_DIR;
+            goto error;
+        }
+    }
+
+    /* Now resolve the rest of the defaults from the config file
+     * We are asuming that the file is well formed or this might have problems.
+     * if we can't resolve the directory then fail.
+     * if we can't resolve the subdirectories, don't fail put them under dir. */
+    result = certcfg_populate_config(conf, cfg_file, cfg_name);
+
+    if (result != CERT_OK)
+    {
+error:
+        NCONF_free(conf);
+    }
+
+    return result;
 }
 
-/*****************************************************************************/
-/*                                                                           */
-/* FUNCTION: CertCfgSetObjectValue                                          */
-/*       Figure out the proper configuration file                            */
-/* INPUT:                                                                    */
-/*       certObjProperty: deontes a property that is stored as an integer    */
-/* OUTPUT:                                                                   */
-/*       void                                                                */
-/* RETURN:                                                                   */
-/**/
-/* NOTES:                                                                    */
-/*       1) Not thread safe                                                  */
-/*                                                                           */
-/*****************************************************************************/
-int CertCfgSetObjectValue(certcfg_Property_t certObjProperty, int value)
+CertReturnCode CertCfgSetObjectValue(CertCfgProperty property, int value)
 {
-  int result = CERT_GENERAL_FAILURE;
+    (void)property;
+    (void)value;
 
-#ifdef D_DEBUG_ENABLED
-  result =  CERT_OK;
-#endif
-
-  PRINT_ERROR2("UNIMPLEMENTED", 0);
-  return result;
+    /* XXX: Not implemented */
+    return CERT_GENERAL_FAILURE;
 }
-  
+
 /*****************************************************************************/
 /*                                                                           */
 /* FUNCTION: CertCfgGetObjectValue                                           */
 /*       Get the value of a property in the configuration.                   */
 /* INPUT:                                                                    */
-/*       certObjProperty: denotes a property that is stored as an integer    */
+/*       property: denotes a property that is stored as an integer    */
 /* OUTPUT:                                                                   */
 /*       value: The value the value associated with the property.            */
 /* RETURN:                                                                   */
@@ -208,40 +199,44 @@ int CertCfgSetObjectValue(certcfg_Property_t certObjProperty, int value)
 /*       1) Not thread safe                                                  */
 /*                                                                           */
 /*****************************************************************************/
-int CertCfgGetObjectValue(certcfg_Property_t certObjProperty, int *propertyValue)
+CertReturnCode CertCfgGetObjectValue(CertCfgProperty property, int *o_val)
 {
-  int rValue = CERT_UNKNOWN_PROPERTY;
-  char filePath[MAX_CERT_PATH];
-
-  switch (certObjProperty)
+    if (o_val == NULL)
     {
-    case CERTCFG_CERT_SERIAL:
-      if (CERT_OK ==
-          (rValue =
-           CertCfgGetObjectStrValue(CERTCFG_CERT_SERIAL_NAME,
-                                     filePath, MAX_CERT_PATH)))
-        {
-          int serialNb = CertGetSerialNumber(filePath);
-          if (0 == serialNb)
-            rValue = CERT_SERIAL_NUMBER_UNAVAILABLE;
-          else 
-            *propertyValue = serialNb;
-        }
-      break;
-
-    default:
-      break;
+        return CERT_INVALID_ARG;
     }
 
-  return rValue;
+    if (property == CERTCFG_CERT_SERIAL)
+    {
+        char file_path[MAX_CERT_PATH];
+        CertReturnCode result;
+
+        result = CertCfgGetObjectStrValue(CERTCFG_CERT_SERIAL_NAME, file_path, sizeof(file_path));
+
+        if (result == CERT_OK)
+        {
+            int sn = CertGetSerialNumber(file_path);
+
+            if (!sn)
+            {
+                return CERT_SERIAL_NUMBER_UNAVAILABLE;
+            }
+
+            *o_val = sn;
+        }
+
+        return result;
+    }
+
+    return CERT_UNKNOWN_PROPERTY;
 }
-  
+
 /*****************************************************************************/
 /*                                                                           */
 /* FUNCTION: CertCfgSetObjectStrValue                                       */
 /*       Figure out the proper configuration file                            */
 /* INPUT:                                                                    */
-/*       certObjectStrProperty: denotes a property that is stored as a string*/
+/*       property: denotes a property that is stored as a string*/
 /* OUTPUT:                                                                   */
 /*        value: the value associated with the property.                     */
 /* RETURN:                                                                   */
@@ -250,44 +245,29 @@ int CertCfgGetObjectValue(certcfg_Property_t certObjProperty, int *propertyValue
 /*       1) Not thread safe                                                  */
 /*                                                                           */
 /*****************************************************************************/
-int CertCfgSetObjectStrValue(certcfg_Property_t certObjStrProperty,
-			      const char *value)
+CertReturnCode CertCfgSetObjectStrValue(CertCfgProperty property, const char *value)
 {
-  int result = CERT_OK;
-  int len;
-  
-  // check for correctness:
-  if (certObjStrProperty >= CERTCFG_MAX_PROPERTY || certObjStrProperty < 0)
-	return CERT_PROPERTY_NOT_FOUND;
-
-  // check for reasonable size
-  if (!value)
+    /* Check for correctness */
+    if ((property < 0) || (property >= CERTCFG_MAX_PROPERTY))
     {
-      if (configObject.descStr[certObjStrProperty])
-		free(configObject.descStr[certObjStrProperty]);
-      configObject.descStr[certObjStrProperty] =  NULL;
+        return CERT_UNKNOWN_PROPERTY;
     }
-  else
-    {  
-      if (MAX_CERT_PATH <= (len = strlen(value)) + 1)
-        {
-          result = CERT_PATH_LIMIT_EXCEEDED;
-        }
-      else
-        {
-          configObject.descStr[certObjStrProperty] = strdup(value);
-        }
+
+    /* Check for reasonable size */
+    if ((value != NULL) && (strlen(value) >= MAX_CERT_PATH))
+    {
+        return CERT_PATH_LIMIT_EXCEEDED;
     }
-  PRINT_CFG_STR_PROPS(certObjStrProperty, value);
-  return result;
+
+    return certcfg_set_val(&g_config, property, value);
 }
-  
+
 /*****************************************************************************/
 /*                                                                           */
 /* FUNCTION: CertCfgGetObjectStrValue                                        */
 /*       Figure out the proper configuration file                            */
 /* INPUT:                                                                    */
-/*       certObjStrProperty: denotes a property that is stored as a string   */
+/*       property: denotes a property that is stored as a string   */
 /*       buf: A user supplied buffer                                         */
 /*       bufLen; the length of the supplied buffer                           */
 /* OUTPUT:                                                                   */
@@ -300,61 +280,45 @@ int CertCfgSetObjectStrValue(certcfg_Property_t certObjStrProperty,
 /* NOTES:                                                                    */
 /*                                                                           */
 /*****************************************************************************/
-int CertCfgGetObjectStrValue(certcfg_Property_t certObjStrProperty, char *buf, int bufLen)
+CertReturnCode CertCfgGetObjectStrValue(CertCfgProperty property, char *o_buf, int len)
 {
-  int rValue = 0;
-  int sLen;
-
-
-  if (certObjStrProperty >= CERTCFG_MAX_PROPERTY)
+    if ((property < 0) || (property >= CERTCFG_MAX_PROPERTY))
     {
+        PRINT_ERROR2("Unknown string property", property);
+        PRINT_RETURN_CODE(CERT_UNKNOWN_PROPERTY);
 
-      PRINT_ERROR2("Unknown string property", certObjStrProperty);
-      PRINT_RETURN_CODE(CERT_UNKNOWN_PROPERTY);
-
-      rValue = CERT_UNKNOWN_PROPERTY;
+        return CERT_UNKNOWN_PROPERTY;
     }
-  else {
-      if (configObject.descStr[certObjStrProperty])  {
-	  if (bufLen <= (sLen = strlen(configObject.descStr[certObjStrProperty])))
-	  {
-	      PRINT_ERROR2("Insufficient buffor for the string property", sLen);
-	      rValue = CERT_INSUFFICIENT_BUFFER_SPACE;
-	  }
-	  else
-	  {
-	      strncpy(buf, configObject.descStr[certObjStrProperty], sLen);
-	      buf[sLen] = '\0';
-	      PRINT_CFG_STR_PROPS(certObjStrProperty, buf);
-	  }
-      }
-  }
 
-  return rValue;
+    if (o_buf == NULL)
+    {
+        return CERT_NULL_BUFFER;
+    }
+
+    if (len <= 0)
+    {
+        return CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
+
+    if (g_config.desc_str[property] == NULL)
+    {
+        *o_buf = '\0';
+    }
+    else
+    {
+        if (strlen(g_config.desc_str[property]) >= (size_t)len)
+        {
+            return CERT_INSUFFICIENT_BUFFER_SPACE;
+        }
+
+        strcpy(o_buf, g_config.desc_str[property]);
+    }
+
+    PRINT_CFG_STR_PROPS(property, o_buf);
+
+    return CERT_OK;
 }
-  
-/* keep in sync with CertCfgProperty_t in cert_cfg.h */
 
-const char *propertyNameList[] =
-  {
-    CERT_DEF_CONF_FILE,  /* CERTCFG_CONFIG_FILE */
-    "default_ca",	/* CERTCFG_CONFIG_NAME */
-    "dir",		/* CERTCFG_ROOT_DIR */
-    "certs",		/* CERTCFG_CERT_DIR */
-    "certificate",	/* CERTCFG_CERTIFICATE */
-    "private_dir",	/* CERTCFG_PRIVATE_KEY_DIR */
-    "private_key",	/* CERTCFG_PRIVATE_KEY */
-    "database",		/* CERTCFG_CERT_DATABASE */
-    "serial",		/* CERTCFG_CERT_SERIAL_NAME */
-    "authorized",	/* CERTCFG_AUTH_CERT_DIR */
-    "public_dir",	/* CERTCFG_PUBLIC_KEY_DIR */
-    "crl_dir", 		/* CERTCFG_CRL_DIR */
-    "package_dir",	/* CERTCFG_PACKAGE_DIR */
-    "authorized",	/* CERTCFG_CERT_SERIAL */
-    "trusted_ca_dir"	/* CERTCFG_TRUSTED_CA_DIR */
-			/* CERTCFG_MAX_PROPERTY */
-  };
-    
 /*****************************************************************************/
 /*                                                                           */
 /* FUNCTION: populateConfig                                                  */
@@ -366,36 +330,92 @@ const char *propertyNameList[] =
 /* NOTES:                                                                    */
 /*                                                                           */
 /*****************************************************************************/
-static int populateConfig(void)
+static CertReturnCode certcfg_populate_config(CONF *conf, const char *cfg_file, const char *cfg_name)
 {
-  certcfg_Property_t i;
-
-  for (i = CERTCFG_ROOT_DIR; i < CERTCFG_MAX_PROPERTY ; i++)
+    static const char *propert_names[] =
     {
-      char *str;
-      /* zero all pointers so if there's no conf we dont' have
-      ** bogus info */
-      configObject.descStr[i] = '\0';
+#       define CM_VAL(prop, str) str
+        CERTCFG_PROPS
+#       undef CM_VAL
+    };
+    CertConfigObject new_config = { NULL, { NULL } };
+    CertCfgProperty property = CERTCFG_ROOT_DIR;
 
-      str = NCONF_get_string(configObject.conf,
-			     configObject.descStr[CERTCFG_CONFIG_NAME],
-			     propertyNameList[i]);
-
-      PRINT_CFG_STR_PROPS(i, str);
-      CertCfgSetObjectStrValue(i, str);
-      
-      // no need to free as NCONF_get_string doesn't return a copy.
+    /* Try to set the cfg_file and cfg_name in the new configuration */
+    if ((certcfg_set_val(&new_config, CERTCFG_CONFIG_FILE, cfg_file) != CERT_OK) ||
+        (certcfg_set_val(&new_config, CERTCFG_CONFIG_NAME, cfg_name) != CERT_OK))
+    {
+        goto error;
     }
-  return 0;
+
+    /* Set the rest of the properties */
+    for ( ; property < CERTCFG_MAX_PROPERTY; ++property)
+    {
+        const char *str_val = NCONF_get_string(conf, cfg_name, propert_names[property]);
+
+        if (certcfg_set_val(&new_config, property, str_val) != CERT_OK)
+        {
+            goto error;
+        }
+
+        /* No need to free as NCONF_get_string doesn't return a copy */
+    }
+
+    /* Free old configuration if exists */
+    if (g_config.conf != NULL)
+    {
+        while (property-- > 0)
+        {
+            if (g_config.desc_str[property] != NULL)
+            {
+                free(g_config.desc_str[property]);
+            }
+        }
+
+        NCONF_free(g_config.conf);
+    }
+
+    g_config = new_config;
+
+    return CERT_OK;
+
+error:
+    /* Dispose of the values already set */
+    while (property-- > 0)
+    {
+        certcfg_set_val(&new_config, property, NULL);
+    }
+
+    return CERT_MEMORY_ERROR;
 }
 
-/*****************************************************************************/
-/*                                                                           */
-/* FUNCTION:                                                                 */
-/* INPUT:                                                                    */
-/* OUTPUT:                                                                   */
-/* RETURN:                                                                   */
-/* NOTES:                                                                    */
-/*                                                                           */
-/*****************************************************************************/
+static CertReturnCode certcfg_set_val(CertConfigObject *obj, CertCfgProperty property, const char *value)
+{
+    char *val_cpy = NULL;
 
+    if (value != NULL)
+    {
+        val_cpy = strdup(value);
+
+        /* Abort if failed to allocate the needed memory */
+        if (val_cpy == NULL)
+        {
+            return CERT_MEMORY_ERROR;
+        }
+    }
+
+    /* Free existing value */
+    if (obj->desc_str[property] != NULL)
+    {
+        free(obj->desc_str[property]);
+    }
+
+    obj->desc_str[property] = val_cpy;
+    PRINT_CFG_STR_PROPS(property, val_cpy);
+
+    return CERT_OK;
+}
+
+#ifdef __cplusplus
+}
+#endif
