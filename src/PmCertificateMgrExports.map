@@ -17,11 +17,11 @@
 # LICENSE@@@
 
 libPmCertificateMgr {
-    global:
+	global:
 	# cert_cfg.h
 	CertCfgOpenConfigFile;
 	CertCfgSetObjectValue;
-    CertCfgGetObjectValue;
+	CertCfgGetObjectValue;
 	CertCfgSetObjectStrValue;
 	CertCfgGetObjectStrValue;
 
@@ -36,20 +36,20 @@ libPmCertificateMgr {
 	CertUpdateDatabaseItemDirect;
 	CertUpdateDatabaseItem;
 	CertDatabaseCountCertsDirect;
-    CertDatabaseCountCerts;
-    CertListDatabaseCertsByStatusDirect;
-    CertListDatabaseCertsByStatus;
-    CertGetNameFromSerialNumberDirect;
-    CertGetNameFromSerialNumber;
+	CertDatabaseCountCerts;
+	CertListDatabaseCertsByStatusDirect;
+	CertListDatabaseCertsByStatus;
+	CertGetNameFromSerialNumberDirect;
+	CertGetNameFromSerialNumber;
 
 	# cert_debug.h
 	strProps;
 	strPropNames;
 	strErrorNames;
-    CertX509Dump;
-    CertPKCS12Dump;
-    initSSLErrors;
-    logSSLErrors;
+	CertX509Dump;
+	CertPKCS12Dump;
+	initSSLErrors;
+	logSSLErrors;
 
 	# cert_mgr.h
 	SetupCertMgrEnviroment;
@@ -74,21 +74,21 @@ libPmCertificateMgr {
 	getTimeString;
 	checkCertDates;
 	CertGetSerialNumber;
-    CertGetSerialNumberInc;
-    CertInitLockFiles;
-    CertLockFile;
-    CertUnlockFile;
-    makePath;
-    cmutils_mkdirp;
-    cmutils_touchp;
-    cmutils_rmdeadlinks;
-    cmutils_exists;
-    cmutils_gzip;
-    cmutils_memdup;
+	CertGetSerialNumberInc;
+	CertInitLockFiles;
+	CertLockFile;
+	CertUnlockFile;
+	makePath;
+	cmutils_mkdirp;
+	cmutils_touchp;
+	cmutils_rmdeadlinks;
+	cmutils_exists;
+	cmutils_gzip;
+	cmutils_memdup;
 
 	# cert_x509.h
 	CertX509ReadStrProperty;
 	checkCert;
 
-    local:  *;
+	local:  *;
 };

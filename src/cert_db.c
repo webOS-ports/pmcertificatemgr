@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 
 #include <openssl/conf.h>
 #include <openssl/bio.h>
@@ -57,13 +58,13 @@
 
 typedef struct db_attr_st
 {
-  int unique_subject;
+    int unique_subject;
 } DB_ATTR;
 
 typedef struct ca_db_st
 {
-  DB_ATTR attributes;
-  TXT_DB *db;
+    TXT_DB *db;
+    DB_ATTR attributes;
 } CA_DB;
 
 static CA_DB* CertLockDatabase(int user);
@@ -74,6 +75,7 @@ static CertReturnCode cmdb_TXT_DB_read(FILE *fp, int num);
 static int cmdb_TXT_DB_write(FILE *fp, TXT_DB *db);
 static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr);
 static CertReturnCode save_index(const char *db_path, CA_DB *db);
+static void free_index(CA_DB *db);
 static int parse_yesno(const char *str, int def);
 
 
@@ -241,6 +243,7 @@ CertReturnCode CertReadDatabase(const char *db_path)
         }
         else
         {
+            free_index(g_clocaldb);
             strcpy(g_loaded_db, db_path);
             g_clocaldb = db;
             result = CERT_OK;
@@ -1344,6 +1347,19 @@ done:
 error:
     close(fd);
     goto done;
+}
+
+static void free_index(CA_DB *db)
+{
+    if (db)
+    {
+        if (db->db)
+        {
+            TXT_DB_free(db->db);
+        }
+
+        OPENSSL_free(db);
+    }
 }
 
 static int parse_yesno(const char *str, int def)
