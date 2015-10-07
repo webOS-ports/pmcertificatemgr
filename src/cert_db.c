@@ -72,7 +72,7 @@ static int CertUnlockDatabase(void);
 static CertStatus getCertStatusByString(const char *status);
 static void* OPENSSL_malloc_wrap(size_t sz);
 static CertReturnCode cmdb_TXT_DB_read(FILE *fp, int num);
-static int cmdb_TXT_DB_write(FILE *fp, TXT_DB *db);
+static CertReturnCode cmdb_TXT_DB_write(FILE *fp, TXT_DB *db);
 static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr);
 static CertReturnCode save_index(const char *db_path, CA_DB *db);
 static void free_index(CA_DB *db);
@@ -584,7 +584,8 @@ CertReturnCode CertCreateDatabaseItemDirect(const char *db_path, const X509 *x50
         goto done;
     }
 
-    record[CERT_DATABASE_ITEM_NAME] = X509_NAME_oneline(X509_get_subject_name((X509 *)x509), NULL, 0);
+    record[CERT_DATABASE_ITEM_NAME] =
+        X509_NAME_oneline(X509_get_subject_name((X509 *)x509), NULL, 0);
 
     if (record[CERT_DATABASE_ITEM_NAME] == NULL)
     {
@@ -1105,7 +1106,7 @@ static CertReturnCode cmdb_TXT_DB_read(FILE *fp, int num)
     return CERT_GENERAL_FAILURE;
 }
 
-static int cmdb_TXT_DB_write(FILE *fp, TXT_DB *db)
+static CertReturnCode cmdb_TXT_DB_write(FILE *fp, TXT_DB *db)
 {
     /* For reasons unknown to me, someone over at Palm decided it was better to
      * copy the entire TXT_DB_write function from OpenSSL than to just use it.

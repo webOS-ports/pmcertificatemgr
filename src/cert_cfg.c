@@ -176,10 +176,11 @@ error:
 
 CertReturnCode CertCfgSetObjectValue(CertCfgProperty property, int value)
 {
-    (void)property;
-    (void)value;
-
-    /* XXX: Not implemented */
+    /* XXX: Not implemented. The only property that can have an int value
+     * is the serial number, though I'm not sure how to handle this change.
+     * We should probably recreate all the certificate links, which isn't
+     * part of CertCfg responsibility. We're probably just better off throwing
+     * this function away */
     return CERT_GENERAL_FAILURE;
 }
 
@@ -366,10 +367,7 @@ static CertReturnCode certcfg_populate_config(CONF *conf, const char *cfg_file, 
     {
         while (property-- > 0)
         {
-            if (g_config.desc_str[property] != NULL)
-            {
-                free(g_config.desc_str[property]);
-            }
+            certcfg_set_val(&g_config, property, NULL);
         }
 
         NCONF_free(g_config.conf);

@@ -469,7 +469,6 @@ CertReturnCode CertInitLockFiles(void)
 int CertLockFile(CertFileLock lock_type)
 {
     int lockstate = lockf(cert_lockfile_fd, F_TLOCK, 0);
-    (void)lock_type;
 
     if (lockstate < 0)
     {
@@ -496,7 +495,6 @@ int CertLockFile(CertFileLock lock_type)
 int CertUnlockFile(CertFileLock lock_type)
 {
     int lockstate = lockf(cert_lockfile_fd, F_ULOCK, 0);
-    (void)lock_type;
 
     if (lockstate < 0)
     {
@@ -545,8 +543,7 @@ char* getPathBySerialCtr(const char *base_name, CertDestDir dst_dir_type, CertOb
     char cfg_dir[MAX_CERT_PATH];
     char full_path[MAX_CERT_PATH];
 
-    /* XXX: Why do we require the user to supply base_name if we don't ever use it? */
-    (void)base_name;
+    /* XXX: Why do we require the user to supply base_name if we never use it? */
 
     if ((obj_type < 0) ||
         (obj_type >= CERT_OBJECT_MAX_OBJECT) ||
@@ -835,7 +832,13 @@ int cmutils_mkdirp(const char *path)
     /* Do not make a directory if it exists */
     if (stat(path, &statbuf) == 0)
     {
-        return 0;
+        if (S_ISDIR(statbuf.st_mode))
+        {
+            return 0;
+        }
+
+        /* The path exists and isn't a directory */
+        return -1;
     }
 
     /* We'll be manipulating the path, so copy it */
@@ -898,7 +901,7 @@ int cmutils_mkdirp(const char *path)
     }
 
     /* Actually make the dir if the last segments wern't evil
-     * and it doesn't exists yet */
+     * and it doesn't exist yet */
     if (stat(path_cpy, &statbuf) == 0)
     {
         rc = 0;
@@ -1126,9 +1129,8 @@ done:
 void* cmutils_memdup(void *(*allocator)(size_t sz), const void *mem, int len, int added_mem)
 {
     void *cpy;
-    ;
 
-    if ((mem == NULL) || (len <= 0) || ((added_mem + len) <= 0))
+    if ((mem == NULL) || (len < 0) || ((added_mem + len) <= 0))
     {
         return NULL;
     }
@@ -1146,7 +1148,7 @@ void* cmutils_memdup(void *(*allocator)(size_t sz), const void *mem, int len, in
 
         if (added_mem > 0)
         {
-            memset((char *)cpy + added_mem, 0, added_mem);
+            memset((char *)cpy + len, 0, added_mem);
         }
     }
 
