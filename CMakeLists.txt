@@ -41,7 +41,7 @@ include_directories(${ZLIB_INCLUDE_DIRS})
 webos_add_compiler_flags(ALL ${ZLIB_CFLAGS_OTHER})
 
 include_directories(include/public)
-webos_add_compiler_flags(ALL -Wall -O0 -g)
+webos_add_compiler_flags(ALL -Wall -Wextra -O0 -g)
 webos_add_linker_options(ALL --version-script=${CMAKE_SOURCE_DIR}/src/PmCertificateMgrExports.map)
 webos_add_linker_options(ALL --no-undefined -O0 -g)
 

@@ -118,8 +118,20 @@ CertReturnCode CertX509ReadStrProperty(const X509 *cert, X509Properties property
 
 CertReturnCode checkCert(const X509 *cert, const char *ca_file, const char *ca_path)
 {
+#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
+    int purpose = -1;
+    char *untfile = NULL;
+    char *trustfile = NULL;
+    STACK_OF(X509) *trusted = NULL;
+    STACK_OF(X509) *untrusted = NULL;
+#endif
+
     X509_LOOKUP *lookup;
     X509_STORE *cert_ctx = X509_STORE_new();
+
+    /* FIXME: This function does nothing currently.
+     * Uncomment the commented-out lines and implement missing
+     * functionality where neede */
 
     if (cert_ctx == NULL)
     {
@@ -160,6 +172,28 @@ CertReturnCode checkCert(const X509 *cert, const char *ca_file, const char *ca_p
         goto error;
     }
 
+#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
+    if (untfile)
+    {
+        if (!(untrusted = load_untrusted(untfile)))
+        {
+            DPRINTF("Error loading untrusted file %s\n", untfile);
+            goto error;
+        }
+    }
+
+    if (trustfile)
+    {
+        if (!(trusted = load_untrusted(trustfile)))
+        {
+            DPRINTF("Error loading untrusted file %s\n", trustfile);
+            goto error;
+        }
+    }
+
+    check(cert_ctx, cert, untrusted, trusted, purpose);
+#endif
+
     X509_STORE_free(cert_ctx);
 
     return CERT_OK;
@@ -168,6 +202,11 @@ error:
     if (cert_ctx != NULL)
     {
         X509_STORE_free(cert_ctx);
+
+#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
+        sk_X509_pop_free(untrusted, X509_free);
+        sk_X509_pop_free(trusted, X509_free);
+#endif
     }
 
     return CERT_GENERAL_FAILURE;
@@ -294,6 +333,118 @@ static int get_ossl_nid(X509Properties property)
         return NID_undef;
     }
 }
+
+#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
+static STACK_OF(X509) *load_untrusted(char *certfile)
+{
+    STACK_OF(X509_INFO) *sk    = NULL;
+    STACK_OF(X509)      *stack = NULL;
+    STACK_OF(X509)      *ret   = NULL;
+    BIO                 *in    = NULL;
+    X509_INFO           *xi;
+
+    if(!(stack = sk_X509_new_null()))
+    {
+        DPRINTF("memory allocation failure\n");
+        goto end;
+    }
+
+    if(!(in = BIO_new_file(certfile, "r")))
+    {
+        DPRINTF("error opening the file, %s\n", certfile);
+        goto end;
+    }
+
+    /* This loads from a file, a stack of x509/crl/pkey sets */
+    if (!(sk = PEM_X509_INFO_read_bio(in, NULL, NULL, NULL)))
+    {
+        DPRINTF("error reading the file, %s\n", certfile);
+        goto end;
+    }
+
+    /* scan over it and pull out the certs */
+    while (sk_X509_INFO_num(sk))
+    {
+        xi = sk_X509_INFO_shift(sk);
+
+        if (xi->x509 != NULL)
+        {
+            sk_X509_push(stack, xi->x509);
+            xi->x509 = NULL;
+        }
+
+        X509_INFO_free(xi);
+    }
+
+    if (!sk_X509_num(stack))
+    {
+        DPRINTF("no certificates in file, %s\n", certfile);
+        sk_X509_free(stack);
+        goto end;
+    }
+
+    ret = stack;
+
+end:
+    BIO_free(in);
+    sk_X509_INFO_free(sk);
+
+    return(ret);
+}
+
+static int check(X509_STORE *ctx,
+                 X509 *x,
+                 STACK_OF(X509) *untrustedChain,
+                 STACK_OF(X509) *trustedChain,
+                 int purpose)
+{
+    int i = 0, ret = 0;
+    X509_STORE_CTX *csc;
+
+    //  fprintf(stdout, "%s: ", (file == NULL) ? "stdin" : file);
+    csc = X509_STORE_CTX_new();
+
+    if (csc == NULL)
+    {
+        goto end;
+    }
+
+    X509_STORE_set_flags(ctx, CERT_X509_STORE_FLAGS);
+
+    if (!X509_STORE_CTX_init(csc, ctx, x, untrustedChain))
+    {
+        goto end;
+    }
+
+    if (trustedChain)
+    {
+        X509_STORE_CTX_trusted_stack(csc, trustedChain);
+    }
+
+    if (purpose >= 0)
+    {
+        X509_STORE_CTX_set_purpose(csc, purpose);
+    }
+
+    i = X509_verify_cert(csc);
+    X509_STORE_CTX_free(csc);
+    ret = 0;
+
+end:
+    if (i)
+    {
+        DPRINTF("OK\n");
+        ret = 1;
+    }
+
+    if (x != NULL)
+    {
+        X509_free(x);
+    }
+
+    return(ret);
+}
+#endif
 
 #ifdef __cplusplus
 }

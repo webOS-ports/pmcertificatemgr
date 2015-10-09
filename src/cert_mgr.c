@@ -57,6 +57,8 @@
 #include "cert_debug.h"
 #include "cert_mgr_prv.h"
 
+#define ARRAY_LEN(arr) (sizeof(arr) / sizeof(arr[0]))
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -358,6 +360,8 @@ CertReturnCode CertResetConfig(const char *config_file)
  */
 CertReturnCode CertReadKeyPackageDirect(const char *pkg_path, const char *dst_path, CertPassCallback pcbk, void *pwd_ctxt, int *sn)
 {
+    /* XXX: `dst_path` is never used in the function called from here, so why supply it? */
+
     switch (getFileType(pkg_path))
     {
     case CERT_PFX_FILE:
@@ -722,7 +726,7 @@ CertReturnCode CertRemoveCertificate(int sn)
     char cert_path[MAX_CERT_PATH];
 
     /* Get one after another */
-    for (iter_dir = 0; iter_dir < sizeof(cert_dirs) / sizeof(cert_dirs[0]); ++iter_dir)
+    for (iter_dir = 0; iter_dir < (int)ARRAY_LEN(cert_dirs); ++iter_dir)
     {
         if ((CertCfgGetObjectStrValue(cert_dirs[iter_dir].dir, cert_path, sizeof(cert_path)) == CERT_OK) &&
             (cert_path[0] != '\0'))
@@ -2144,7 +2148,7 @@ static CertReturnCode removeCert(int sn, const char *path, const char *prefix, c
     }
 
     if (snprintf(full_path, sizeof(full_path),
-                 "%s/%s%X.%s", path, prefix, sn, ext) >= sizeof(full_path))
+                 "%s/%s%X.%s", path, prefix, sn, ext) >= (int)sizeof(full_path))
     {
         return CERT_PATH_LIMIT_EXCEEDED;
     }
@@ -2172,7 +2176,7 @@ static CertReturnCode removeCert(int sn, const char *path, const char *prefix, c
         }
 
         if (snprintf(full_path, sizeof(full_path),
-                     "%s/%s%X_%d.%s", path, prefix, sn, counter, ext) >= sizeof(full_path))
+                     "%s/%s%X_%d.%s", path, prefix, sn, counter, ext) >= (int)sizeof(full_path))
         {
             return CERT_BUFFER_LIMIT_EXCEEDED;
         }
@@ -2245,7 +2249,7 @@ static CertReturnCode getCertLinkPath(char *o_buf, int len, unsigned long hash, 
 
     pos = snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
 
-    if (pos >= sizeof(filename))
+    if (pos >= (int)sizeof(filename))
     {
         return CERT_INSUFFICIENT_BUFFER_SPACE;
     }

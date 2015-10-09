@@ -91,7 +91,7 @@ CertReturnCode cmutils_ip2str(const ASN1_OCTET_STRING *ip, char *o_buf, size_t b
     }
 
     /* Make sure the output buffer is NUL terminated */
-    if (written_chars >= buf_len)
+    if (written_chars >= (int)buf_len)
     {
         return CERT_INSUFFICIENT_BUFFER_SPACE;
     }
@@ -198,7 +198,7 @@ CertReturnCode getTimeString(const ASN1_TIME *time_data, char *o_buf, int buflen
         BUF_MEM *bufmem;
         BIO_get_mem_ptr(bio, &bufmem);
 
-        if (bufmem->length >= buflen)
+        if ((int)bufmem->length >= buflen)
         {
             result = CERT_INSUFFICIENT_BUFFER_SPACE;
         }
@@ -397,7 +397,7 @@ CertReturnCode CertInitLockFiles(void)
     /* we may need finer grain than one, but for now */
     if (snprintf(new_root_path + path_len,
                  sizeof(new_root_path) - path_len,
-                 "/.lock") >= sizeof(new_root_path) - path_len)
+                 "/.lock") >= (int)sizeof(new_root_path) - path_len)
     {
         return CERT_INSUFFICIENT_BUFFER_SPACE;
     }
@@ -582,7 +582,7 @@ char* getPathBySerialCtr(const char *base_name, CertDestDir dst_dir_type, CertOb
                      cfg_dir,
                      obj_fnames[obj_type],
                      sn,
-                     obj_fexts[obj_type]) >= sizeof(full_path))
+                     obj_fexts[obj_type]) >= (int)sizeof(full_path))
         {
             return NULL;
         }
@@ -592,7 +592,7 @@ char* getPathBySerialCtr(const char *base_name, CertDestDir dst_dir_type, CertOb
                       obj_fnames[obj_type],
                       sn,
                       count - 1,
-                      obj_fexts[obj_type]) >= sizeof(full_path))
+                      obj_fexts[obj_type]) >= (int)sizeof(full_path))
     {
         return NULL;
     }

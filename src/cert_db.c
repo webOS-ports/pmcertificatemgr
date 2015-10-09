@@ -1158,7 +1158,7 @@ static CertReturnCode cmdb_TXT_DB_write(const char *filename, TXT_DB *db)
 
                 do /* while (*field != '\0') */
                 {
-                    size_t written_bytes = 0;
+                    int written_bytes = 0;
 
                     do /* while ((*field != '\0') && (written_bytes < sizeof(tmpbuf))) */
                     {
@@ -1173,7 +1173,14 @@ static CertReturnCode cmdb_TXT_DB_write(const char *filename, TXT_DB *db)
                         case '\\':
                         case '\t':
                         case '\n':
-                            /* FIXME: Buffer overrun ahead! */
+                            /* if there's no space in the buffer for escaping
+                             * break the loop, write the data to file and get
+                             * back here with buffer space */
+                            if (sizeof(tmpbuf) - written_bytes < 2)
+                            {
+                                goto flush_to_file;
+                            }
+
                             tmpbuf[written_bytes++] = '\\';
 
                         default:
@@ -1183,6 +1190,7 @@ static CertReturnCode cmdb_TXT_DB_write(const char *filename, TXT_DB *db)
                         ++field;
                     } while ((*field != '\0') && (written_bytes < sizeof(tmpbuf)));
 
+                flush_to_file:
                     if (write(fd, tmpbuf, written_bytes) != written_bytes)
                     {
                         goto error;
@@ -1334,10 +1342,6 @@ static CertReturnCode save_index(const char *db_path, CA_DB *db)
 
 done:
     return result;
-
-error:
-    close(fd);
-    goto done;
 }
 
 static void free_index(CA_DB *db)
