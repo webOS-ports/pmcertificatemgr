@@ -71,8 +71,8 @@ static CA_DB* CertLockDatabase(int user);
 static int CertUnlockDatabase(void);
 static CertStatus getCertStatusByString(const char *status);
 static void* OPENSSL_malloc_wrap(size_t sz);
-static CertReturnCode cmdb_TXT_DB_read(FILE *fp, int num);
-static CertReturnCode cmdb_TXT_DB_write(FILE *fp, TXT_DB *db);
+static CertReturnCode cmdb_TXT_DB_read(const char *filepath, int num, TXT_DB **o_db);
+static CertReturnCode cmdb_TXT_DB_write(const char *filepath, TXT_DB *db);
 static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr);
 static CertReturnCode save_index(const char *db_path, CA_DB *db);
 static void free_index(CA_DB *db);
@@ -1100,8 +1100,18 @@ static CertStatus getCertStatusByString(const char *status)
     return CERT_STATUS_UNDEFINED;
 }
 
-static CertReturnCode cmdb_TXT_DB_read(FILE *fp, int num)
+static CertReturnCode cmdb_TXT_DB_read(const char *filepath, int num, TXT_DB **o_db)
 {
+    int fd = open(filepath, O_RDONLY);
+
+    if (fd < 0)
+    {
+        DPRINTF("load_index: %s\n", strerror(errno));
+        return CERT_OPEN_FILE_FAILED;
+    }
+
+    close(fd);
+
     /* FIXME: Implement! */
     return CERT_GENERAL_FAILURE;
 }
@@ -1198,7 +1208,6 @@ error:
 
 static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr)
 {
-    FILE *db_file;
     long errorline = -1;
     CA_DB *retdb = NULL;
     TXT_DB *tmpdb = NULL;
@@ -1216,16 +1225,7 @@ static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr)
         goto done;
     }
 
-    db_file = fopen(db_path, "r");
-
-    if (db_file == NULL)
-    {
-        DPRINTF("load_index: %s\n", strerror(errno));
-        goto done;
-    }
-
-    result = cmdb_TXT_DB_read(db_file, CERT_DATABASE_ITEM_MAX);
-    fclose(db_file);
+    result = cmdb_TXT_DB_read(db_path, CERT_DATABASE_ITEM_MAX, &tmpdb);
 
     if (result != CERT_OK)
     {
@@ -1274,12 +1274,12 @@ static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr)
 
 
 cleanup:
-    if (dbattr_conf)
+    if (dbattr_conf != NULL)
     {
         NCONF_free(dbattr_conf);
     }
 
-    if (tmpdb)
+    if (tmpdb != NULL)
     {
         TXT_DB_free(tmpdb);
     }
