@@ -1106,17 +1106,25 @@ static CertReturnCode cmdb_TXT_DB_read(FILE *fp, int num)
     return CERT_GENERAL_FAILURE;
 }
 
-static CertReturnCode cmdb_TXT_DB_write(FILE *fp, TXT_DB *db)
+static CertReturnCode cmdb_TXT_DB_write(const char *filename, TXT_DB *db)
 {
     /* For reasons unknown to me, someone over at Palm decided it was better to
      * copy the entire TXT_DB_write function from OpenSSL than to just use it.
      * I decided that while we're at it it'd be better if we do it in a more
      * efficient way, so I rewrote it to not use dynamic memory allocation at
-     * all (except what stdio already allocates, that is).
-     * This code should also (in theory) be more readable. */
-    long record_idx;
-    long nrecords = sk_OPENSSL_PSTRING_num(db->data);
-    long nfields = db->num_fields;
+     * all. This code should also (in theory) be more readable. */
+    long record_idx, nrecords, nfields;
+    CertReturnCode result = CERT_GENERAL_FAILURE;
+    int fd = open(filename, O_TRUNC | O_WRONLY);
+
+    if (fd < 0)
+    {
+        DPRINTF("unable to open '%s'\n", filename);
+        return CERT_OPEN_FILE_FAILED;
+    }
+
+    nrecords = sk_OPENSSL_PSTRING_num(db->data);
+    nfields = db->num_fields;
 
     for (record_idx = 0; record_idx < nrecords; ++record_idx)
     {
@@ -1128,14 +1136,15 @@ static CertReturnCode cmdb_TXT_DB_write(FILE *fp, TXT_DB *db)
             const char *field = record[field_idx];
 
             /* Append TAB separator after each field */
-            if (field_idx > 0)
+            if ((field_idx > 0) &&
+                (write(fd, "\t", 1) != 1))
             {
-                fputc('\t', fp);
+                goto error;
             }
 
             if ((field != NULL) && (*field != '\0'))
             {
-                char tmpbuf[MAX_CERT_PATH];
+                char tmpbuf[MAX_CERT_BUFSIZ];
 
                 do /* while (*field != '\0') */
                 {
@@ -1149,10 +1158,12 @@ static CertReturnCode cmdb_TXT_DB_write(FILE *fp, TXT_DB *db)
                          * so we need to distinguish between literals and separators.
                          * We do that by prepending a backslash ('\\') before each
                          * literal TAB or LF character. Note that OpenSSL's implementation
-                         * doesn't handle LF literals, so this version is at least
-                         * better in that aspect */
+                         * doesn't handle LF and backslash literals, so this version
+                         * is at least better in that aspect */
+                        case '\\':
                         case '\t':
                         case '\n':
+                            /* FIXME: Buffer overrun ahead! */
                             tmpbuf[written_bytes++] = '\\';
 
                         default:
@@ -1162,22 +1173,27 @@ static CertReturnCode cmdb_TXT_DB_write(FILE *fp, TXT_DB *db)
                         ++field;
                     } while ((*field != '\0') && (written_bytes < sizeof(tmpbuf)));
 
-                    if (fwrite(tmpbuf, written_bytes, 1, fp) <= 0)
+                    if (write(fd, tmpbuf, written_bytes) != written_bytes)
                     {
-                        return CERT_GENERAL_FAILURE;
+                        goto error;
                     }
                 } while (*field != '\0');
             }
 
             /* Append a new line after each record */
-            if (fputc('\n', fp) != '\n')
+            if (write(fd, "\n", 1) != 1)
             {
-                return CERT_GENERAL_FAILURE;
+                goto error;
             }
         }
     }
 
-    return CERT_OK;
+    result = CERT_OK;
+
+error:
+    close(fd);
+
+    return result;
 }
 
 static CA_DB* load_index(const char *db_path, DB_ATTR *db_attr)
@@ -1274,10 +1290,8 @@ done:
 
 static CertReturnCode save_index(const char *db_path, CA_DB *db)
 {
-    int fd;
-    FILE *db_file, *attr_file;
-    char filename[MAX_CERT_PATH];
-    char attrfilename[MAX_CERT_PATH];
+    int fd, len;
+    char attrfilename[MAX_CERT_PATH], attrbuf[MAX_CERT_BUFSIZ];
     CertReturnCode result = CERT_GENERAL_FAILURE;
 
     if (snprintf(attrfilename, sizeof(attrfilename), "%s.attr", db_path) >= (int)sizeof(attrfilename))
@@ -1285,38 +1299,21 @@ static CertReturnCode save_index(const char *db_path, CA_DB *db)
         return CERT_PATH_LIMIT_EXCEEDED;
     }
 
-    /* We already checked that the largest string fits nicely, so we
-     * can run with sprintf without worries about buffer overruns */
-    sprintf(filename, "%s", db_path);
+    len = snprintf(attrbuf, sizeof(attrbuf),
+                   "unique_subject = %s\n", db->attributes.unique_subject ? "yes" : "no");
 
-    /* Open with `open` first to truncate the file while also
-     * creating it if it doesn't exists */
-    fd = open(filename, O_TRUNC | O_WRONLY);
-
-    if (fd < 0)
+    if (len >= (int)sizeof(attrbuf))
     {
-        return CERT_OPEN_FILE_FAILED;
+        return CERT_BUFFER_LIMIT_EXCEEDED;
     }
 
-    /* Reopen with `fopen` to get buffering and other goodies */
-    db_file = fdopen(fd, "w");
-
-    if (db_file == NULL)
-    {
-        DPRINTF("unable to open '%s'\n", filename);
-        result = CERT_OPEN_FILE_FAILED;
-        goto error;
-    }
-
-    result = cmdb_TXT_DB_write(db_file, db->db);
-    fclose(db_file);
+    result = cmdb_TXT_DB_write(db_path, db->db);
 
     if (result != CERT_OK)
     {
         return result;
     }
 
-    /* Same as with the DB file -- we need truncation */
     fd = open(attrfilename, O_TRUNC | O_WRONLY);
 
     if (fd < 0)
@@ -1324,23 +1321,16 @@ static CertReturnCode save_index(const char *db_path, CA_DB *db)
         return CERT_OPEN_FILE_FAILED;
     }
 
-    attr_file = fopen(attrfilename, "w");
-
-    if (attr_file == NULL)
+    if (write(fd, attrbuf, len) != len)
     {
-        DPRINTF("unable to open '%s'\n", attrfilename);
-        result = CERT_OPEN_FILE_FAILED;
-        goto error;
+        result = CERT_GENERAL_FAILURE;
     }
-
-    if (fprintf(attr_file,
-                "unique_subject = %s\n",
-                db->attributes.unique_subject ? "yes" : "no") > 0)
+    else
     {
         result = CERT_OK;
     }
 
-    fclose(attr_file);
+    close(fd);
 
 done:
     return result;

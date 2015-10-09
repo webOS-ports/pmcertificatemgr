@@ -153,7 +153,7 @@ CertReturnCode CertCfgOpenConfigFile(const char *cfg_file, const char *cfg_name)
 
         if (stat(dir_name, &stat_buf) != 0)
         {
-            fprintf(stdout, "Can't find %s\n", dir_name);
+            DPRINTF("Can't find %s\n", dir_name);
             result = CERT_UNDEFINED_ROOT_DIR;
             goto error;
         }
@@ -174,64 +174,6 @@ error:
     return result;
 }
 
-CertReturnCode CertCfgSetObjectValue(CertCfgProperty property, int value)
-{
-    /* XXX: Not implemented. The only property that can have an int value
-     * is the serial number, though I'm not sure how to handle this change.
-     * We should probably recreate all the certificate links, which isn't
-     * part of CertCfg responsibility. We're probably just better off throwing
-     * this function away */
-    return CERT_GENERAL_FAILURE;
-}
-
-/*****************************************************************************/
-/*                                                                           */
-/* FUNCTION: CertCfgGetObjectValue                                           */
-/*       Get the value of a property in the configuration.                   */
-/* INPUT:                                                                    */
-/*       property: denotes a property that is stored as an integer    */
-/* OUTPUT:                                                                   */
-/*       value: The value the value associated with the property.            */
-/* RETURN:                                                                   */
-/*       CERT_OK                                                             */
-/*       CERT_SERIAL_NUMBER_UNAVAILABLE: The serial number is not available. */
-/*       CERT_UNKNOWN_PROPERTY: The property is not supported.               */
-/* NOTES:                                                                    */
-/*       1) Not thread safe                                                  */
-/*                                                                           */
-/*****************************************************************************/
-CertReturnCode CertCfgGetObjectValue(CertCfgProperty property, int *o_val)
-{
-    if (o_val == NULL)
-    {
-        return CERT_INVALID_ARG;
-    }
-
-    if (property == CERTCFG_CERT_SERIAL)
-    {
-        char file_path[MAX_CERT_PATH];
-        CertReturnCode result;
-
-        result = CertCfgGetObjectStrValue(CERTCFG_CERT_SERIAL_NAME, file_path, sizeof(file_path));
-
-        if (result == CERT_OK)
-        {
-            int sn = CertGetSerialNumber(file_path);
-
-            if (!sn)
-            {
-                return CERT_SERIAL_NUMBER_UNAVAILABLE;
-            }
-
-            *o_val = sn;
-        }
-
-        return result;
-    }
-
-    return CERT_UNKNOWN_PROPERTY;
-}
-
 /*****************************************************************************/
 /*                                                                           */
 /* FUNCTION: CertCfgSetObjectStrValue                                       */
@@ -249,18 +191,42 @@ CertReturnCode CertCfgGetObjectValue(CertCfgProperty property, int *o_val)
 CertReturnCode CertCfgSetObjectStrValue(CertCfgProperty property, const char *value)
 {
     /* Check for correctness */
-    if ((property < 0) || (property >= CERTCFG_MAX_PROPERTY))
+    switch (property)
     {
-        return CERT_UNKNOWN_PROPERTY;
+    case CERTCFG_CONFIG_FILE:
+    case CERTCFG_CONFIG_NAME:
+        /* FIXME: When setting config file and name we should probably reload
+         * the configuration and free the old one. Do we really want to support
+         * this? Is there an actual use case to setting these without using
+         * the proper OpenConfigFile function? */
+         return CERT_CANNOT_UPDATE_PROPERTY;
+
+    case CERTCFG_ROOT_DIR:
+    case CERTCFG_CERT_DIR:
+    case CERTCFG_CERTIFICATE:
+    case CERTCFG_PRIVATE_KEY_DIR:
+    case CERTCFG_PRIVATE_KEY:
+    case CERTCFG_CERT_DATABASE:
+    case CERTCFG_CERT_SERIAL_NAME:
+    case CERTCFG_AUTH_CERT_DIR:
+    case CERTCFG_PUBLIC_KEY_DIR:
+    case CERTCFG_CRL_DIR:
+    case CERTCFG_PACKAGE_DIR:
+    case CERTCFG_CERT_SERIAL:
+    case CERTCFG_TRUSTED_CA_DIR:
+        /* Check for reasonable size */
+        if ((value != NULL) && (strlen(value) >= MAX_CERT_PATH))
+        {
+            return CERT_PATH_LIMIT_EXCEEDED;
+        }
+
+        return certcfg_set_val(&g_config, property, value);
+
+    default:
+        break;
     }
 
-    /* Check for reasonable size */
-    if ((value != NULL) && (strlen(value) >= MAX_CERT_PATH))
-    {
-        return CERT_PATH_LIMIT_EXCEEDED;
-    }
-
-    return certcfg_set_val(&g_config, property, value);
+    return CERT_UNKNOWN_PROPERTY;
 }
 
 /*****************************************************************************/

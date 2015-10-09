@@ -908,13 +908,11 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
     case 'i':  // install the package
 
       if (CERT_OK ==
-          (rValue = CertCfgGetObjectValue(CERTCFG_CERT_SERIAL,
-                                           &serialNb)))
+          (rValue = CertInstallKeyPackage(param1,
+                                          NULL,
+                                          "Help Im a Rock", &serialNb)))
         {
           printf("installing %s (#%d)\n", param1, serialNb);
-          rValue = CertInstallKeyPackage(param1,
-                                          NULL,
-                                          "Help Im a Rock", &serialNb);
           PRINT_RETURN_CODE(rValue);
 
 	  printf("Authorizing %s (#%d)\n", param1, serialNb);

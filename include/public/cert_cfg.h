@@ -105,23 +105,6 @@ extern "C" {
 extern CertReturnCode CertCfgOpenConfigFile(const char *cfg_file, const char *cfg_name);
 
 /**
- * @brief Get the value of a property in the configuration.
- *
- * Properties, if they can be expressed as an integer, can be checked here.
- * Currently CERTCFG_CERT_SERIAL is the only property available.
- *
- * @param[in] property The property in question.
- * @param[out] o_val the value associated with the property.
- *             <serial number\> when the property is CERTCFG_CERT_SERIAL.
- *
- * @return CERT_OK
- * @return CERT_SERIAL_NUMBER_UNAVAILABLE: The serial number is not available.
- * @return CERT_UNKNOWN_PROPERTY: The property is not supported.
- */
-extern CertReturnCode CertCfgSetObjectValue(CertCfgProperty property, int value);
-extern CertReturnCode CertCfgGetObjectValue(CertCfgProperty property, int *o_val);
-
-/**
  * @brief Set the value of a property in the configuration.
  *
  * @param[in] property The property

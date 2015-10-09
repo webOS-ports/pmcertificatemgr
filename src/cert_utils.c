@@ -277,28 +277,7 @@ CertReturnCode checkCertDates(const X509 *cert)
 
 int CertGetSerialNumber(const char *path)
 {
-    int sn = 0;
-    int fd = open(path, O_RDONLY);
-
-    if (fd >= 0)
-    {
-        char in_buf[MAX_CERT_PATH];
-        int len = read(fd, in_buf, sizeof(in_buf) - 1);
-
-        if (len >= 0)
-        {
-            in_buf[len] = '\0';
-
-            if (sscanf(in_buf, "%x", &sn) != 1)
-            {
-                sn = 0;
-            }
-        }
-
-        close(fd);
-    }
-
-    return sn;
+    return CertGetSerialNumberInc(path, 0);
 }
 
 /*****************************************************************************/
@@ -333,32 +312,46 @@ int CertGetSerialNumberInc(const char *path, int increment)
 
     if (fd >= 0)
     {
-        char in_buf[MAX_CERT_PATH];
+        char in_buf[MAX_CERT_BUFSIZ];
         int len = read(fd, in_buf, sizeof(in_buf) - 1);
 
         if (len < 0)
         {
             DPRINTF("Error %d reading certificate serial number\n", errno);
         }
-        else if ((sscanf(in_buf, "%x", &sn) == 1) && (sn))
+        else
         {
-            DPRINTF("Serial is currently %d\n", sn);
+            in_buf[len] = '\0';
 
-            if (snprintf(in_buf, sizeof(in_buf), "%X ", sn + increment) >= sizeof(in_buf))
+            if (sscanf(in_buf, "%x", &sn) != 1)
             {
-                DPRINTF("Temporary buffer too small to hold the new SN\n");
+                sn = 0;
             }
-            else if (lseek(fd, 0, SEEK_SET) != 0)
+            else if ((sn != 0) && (increment != 0))
             {
-                DPRINTF("Error %d seeking to beginning of %s\n", errno, path);
-            }
-            else if (ftruncate(fd, 0) != 0)
-            {
-                DPRINTF("Error %d truncating %s\n", errno, path);
-            }
-            else if (write(fd, in_buf, 4) != 4)
-            {
-                DPRINTF("Error %d writing to %s\n", errno, path);
+                /* FIXME: It seems that we treat the SN everywhere as a 16-bit
+                 * unsigned integer. What if `increment` causes it to overflow? */
+                DPRINTF("Serial is currently %d\n", sn);
+
+                len = snprintf(in_buf, sizeof(in_buf), "%04X ", sn + increment);
+
+                if (len >= sizeof(in_buf))
+                {
+                    /* Can never actually happen, but here goes */
+                    DPRINTF("Temporary buffer too small to hold the new SN\n");
+                }
+                else if (lseek(fd, 0, SEEK_SET) != 0)
+                {
+                    DPRINTF("Error %d seeking to beginning of %s\n", errno, path);
+                }
+                else if (ftruncate(fd, 0) != 0)
+                {
+                    DPRINTF("Error %d truncating %s\n", errno, path);
+                }
+                else if (write(fd, in_buf, len) != len)
+                {
+                    DPRINTF("Error %d writing to %s\n", errno, path);
+                }
             }
         }
 
@@ -1080,8 +1073,7 @@ int cmutils_gzip(const char *src_file, const char *out_file)
     size_t len;
     FILE *plain_file;
     gzFile comp_file;
-    /* Is 1024 good? We don't want to eat too much stack space */
-    unsigned char tmpbuf[1024];
+    unsigned char tmpbuf[MAX_CERT_BUFSIZ];
 
     plain_file = fopen(src_file, "rb");
 

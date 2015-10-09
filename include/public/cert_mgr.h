@@ -37,6 +37,7 @@
 #define CERT_PROPERTY_DIR       0x00000001
 #define CERT_VERSION_NUMBER     "0.1"
 #define MAX_CERT_PATH           256
+#define MAX_CERT_BUFSIZ         512
 
 /*!
  * The maximum number of files with the same name
