@@ -29,49 +29,32 @@
 #define __CERT_DB_H__
 
 #include <openssl/txt_db.h>
+#include "cert_cfg.h"
+#include "cert_mgr.h"
 
 /*! Properties of the data base itself    */
 typedef enum
-  {
+{
     CERT_DATABASE_SIZE,  /*!< The number of items in the database */
     CERT_DATABASE_MAX    /*!< A fencepost value                   */
-  } CertDbProperty_t;
-  
+} CertDbProperty;
+
   /*! Properties of items in the database */
-typedef enum 
-  {
+typedef enum
+{
     CERT_DATABASE_ITEM_STATUS,     /*!< The status of the certificate   */
     CERT_DATABASE_ITEM_EXPIRATION, /*!< The certificate expiration date */
     CERT_DATABASE_ITEM_START,      /*!< The certificate start date      */
-    CERT_DATABASE_ITEM_SERIAL,     /*!< The certificate serial number   */ 
+    CERT_DATABASE_ITEM_SERIAL,     /*!< The certificate serial number   */
     CERT_DATABASE_ITEM_FILE,       /*!< The certificate file name       */
     CERT_DATABASE_ITEM_NAME,       /*!< The certificate name            */
-    CERT_DATABASE_ITEM_MAX         /*!< */
-  } CertDbItemProperty_t;
+    CERT_DATABASE_ITEM_MAX
+} CertDbItemProperty;
 
-/*!
- * Characters taken from <citation> used to designate the status of a 
- * given certificate in the database
- */
-extern const char *statusNames[];
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/*!
- * Read the database into memory
- *
- * @param[in] dbName the file containing the desired database
- *
- * @return CERT_OK if the database was successfully read and deciphered
- * @return CERT_DATABASE_INITIALIZATION_ERROR the database wasn't initialized
- * @return CERT_FILE_ACCESS_FAILURE if the file could not be found or loaded
- * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
- *
- */
-CertReturnCode_t CertReadDatabase(char *dbName);
-
 
 /*!
  * Initialize the database system
@@ -86,8 +69,33 @@ CertReturnCode_t CertReadDatabase(char *dbName);
  * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another.
  *
  */
-CertReturnCode_t CertInitDatabase(char *dbName);
+extern CertReturnCode CertInitDatabase(const char *db_path);
 
+/*!
+ * Read the database into memory
+ *
+ * @param[in] dbName the file containing the desired database
+ *
+ * @return CERT_OK if the database was successfully read and deciphered
+ * @return CERT_DATABASE_INITIALIZATION_ERROR the database wasn't initialized
+ * @return CERT_FILE_ACCESS_FAILURE if the file could not be found or loaded
+ * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
+ *
+ */
+extern CertReturnCode CertReadDatabase(const char *db_path);
+
+/*!
+ * Write the database to file
+ *
+ * @param[in] dbName the file for the desired database
+ *
+ * @return CERT_OK if the database was successfully written
+ * @return CERT_DATABASE_NOT_AVAILABLE if The database could not be opened
+ * @return CERT_NULL_BUFFER if trying to save a database without a name
+ * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
+ *
+ */
+extern CertReturnCode CertWriteDatabase(const char *db_name);
 
 /*!
  * Get information on the database itself
@@ -103,7 +111,7 @@ CertReturnCode_t CertInitDatabase(char *dbName);
  * @todo set property to enumeration type.
  *
  */
-CertReturnCode_t CertGetDatabaseInfo(int32_t property, int32_t *value);
+extern CertReturnCode CertGetDatabaseInfo(CertDbProperty property, int *o_val);
 
 
 /*!
@@ -122,31 +130,13 @@ CertReturnCode_t CertGetDatabaseInfo(int32_t property, int32_t *value);
  * @return CERT_DATABASE_LOCKED if the database is locked by another
  *
  */
-CertReturnCode_t CertGetDatabaseStrValue(int index,
-                                         CertDbItemProperty_t property,
-                                         char *propertyStr, int len);
+extern CertReturnCode CertGetDatabaseStrValue(int index, CertDbItemProperty property, char *o_buf, int len);
 
 
-/*!
- * Read the database into memory
- *
- * @param[in] dbName the file containing the desired database
- *
- * @return CERT_OK if the database was successfully read and deciphered
- * @return CERT_DATABASE_INITIALIZATION_ERROR the database wasn't initialized
- * @return CERT_FILE_ACCESS_FAILURE if the file could not be found or loaded
- * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
- *
- */
-CertReturnCode_t CertCreateDatabaseItem(X509   *x509,
-                                        char   *name,
-                                        int32_t serial,
-                                        const char   *value);
 /*!
  * Put a new item into the database
  *
  * @param[in] x509 The database revolves around certificates
- * @param[in] name The name of the database file.
  * @param[in] serial The serial number for the certificate
  * @param[in] value  The status value.
  *
@@ -156,22 +146,13 @@ CertReturnCode_t CertCreateDatabaseItem(X509   *x509,
  * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
  *
  */
-CertReturnCode_t CertUpdateDatabaseItem(char *dbName, int32_t serialNb,
-                                        CertDbItemProperty_t property,
-                                        const char *value);
-/*!
- * Write the database to file
- *
- * @param[in] dbName the file for the desired database
- *
- * @return CERT_OK if the database was successfully written
- * @return CERT_DATABASE_NOT_AVAILABLE if The database could not be opened
- * @return CERT_NULL_BUFFER if trying to save a database without a name
- * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
- *
- */
-CertReturnCode_t CertWriteDatabase(char *dbName);
+extern CertReturnCode CertCreateDatabaseItemDirect(const char *db_path, const X509 *x509, const char *file_name, int sn, CertStatus status);
 
+extern CertReturnCode CertCreateDatabaseItem(const X509 *x509, const char *file_name, int sn, CertStatus status);
+
+extern CertReturnCode CertUpdateDatabaseItemDirect(const char *db_path, int sn, CertDbItemProperty property, const char *value);
+
+extern CertReturnCode CertUpdateDatabaseItem(int sn, CertDbItemProperty property, const char *value);
 
 /*!
  * Count the certificates registered in the given database
@@ -186,9 +167,9 @@ CertReturnCode_t CertWriteDatabase(char *dbName);
  * @return CERT_DATABASE_LOCKED if the lock file has been aquired by another
  *
  */
-CertReturnCode_t CertDatabaseCountCertsDirect(char *dbName,
-                                              CertStatus_t certStatus,
-                                              int32_t *certNb);
+extern CertReturnCode CertDatabaseCountCertsDirect(const char *db_path, CertStatus status, int *o_ncerts);
+
+extern CertReturnCode CertDatabaseCountCerts(CertStatus status, int *o_ncerts);
 
 
 /*!
@@ -206,11 +187,7 @@ CertReturnCode_t CertDatabaseCountCertsDirect(char *dbName,
  * @return CERT_DATABASE_LOCKED if the lock file has been aquired by another
  *
  */
-CertReturnCode_t CertListDatabaseCertsByStatusDirect(char *dbName,
-                                                     CertStatus_t certStatus,
-                                                     int32_t *certList,
-                                                     int32_t *certNb);
-
+extern CertReturnCode CertListDatabaseCertsByStatusDirect(const char *db_path, CertStatus status, int *o_list, int *io_ncerts);
 
 /*!
  * Return a list of certificates filtered by status from the default database
@@ -227,24 +204,8 @@ CertReturnCode_t CertListDatabaseCertsByStatusDirect(char *dbName,
  * @return CERT_DATABASE_LOCKED if the lock file has been aquired by another
  *
  */
-CertReturnCode_t CertListDatabaseCertsByStatus(CertStatus_t certStatus,
-                                               int32_t *certList,
-                                               int32_t *certNb);
-/*!
- * Read the database into memory
- *
- * @param[in] dbName the file containing the desired database
- *
- * @return CERT_OK if the database was successfully read and deciphered
- * @return CERT_DATABASE_INITIALIZATION_ERROR the database wasn't initialized
- * @return CERT_FILE_ACCESS_FAILURE if the file could not be found or loaded
- * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
- *
- */
-CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
-                                                   int32_t serialNb,
-                                                   char   *buf,
-                                                   int     bufLen);
+extern CertReturnCode CertListDatabaseCertsByStatus(CertStatus status, int *o_list, int *io_ncerts);
+
 
 /*!
  * Read the database into memory
@@ -257,49 +218,22 @@ CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
  * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
  *
  */
-CertReturnCode_t CertGetNameFromSerialNumber(int32_t serialNb,
-                                             char   *buf,
-                                             int     bufLen);
+extern CertReturnCode CertGetNameFromSerialNumberDirect(const char *db_path, int sn, char *o_buf, int len);
 
-#define DB_type         0
-#define DB_exp_date     1
-#define DB_rev_date     2
-#define DB_serial       3       /* index - unique */
-#define DB_file         4       
-#define DB_name         5       /* index - unique when active & not disabled */
-#define DB_NUMBER       6
+/*!
+ * Read the database into memory
+ *
+ * @param[in] dbName the file containing the desired database
+ *
+ * @return CERT_OK if the database was successfully read and deciphered
+ * @return CERT_DATABASE_INITIALIZATION_ERROR the database wasn't initialized
+ * @return CERT_FILE_ACCESS_FAILURE if the file could not be found or loaded
+ * @return CERT_LOCK_FILE_LOCKED if the lock file has been aquired by another
+ *
+ */
+extern CertReturnCode CertGetNameFromSerialNumber(int sn, char *o_buf, int len);
 
-#define DB_TYPE_REV	'R'
-#define DB_TYPE_EXP	'E'
-#define DB_TYPE_VAL	'V'
-
-typedef struct db_attr_st
-{
-  int unique_subject;
-} DB_ATTR;
-
-typedef struct ca_db_st
-{
-  DB_ATTR attributes;
-  TXT_DB *db;
-} CA_DB;
-
-
-BIGNUM *load_serial(char *serialfile, int create, ASN1_INTEGER **retai);
-int save_serial(char *serialfile, char *suffix,
-                BIGNUM *serial, ASN1_INTEGER **retai);
-int rotate_serial(char *serialfile, char *new_suffix, char *old_suffix);
-int rand_serial(BIGNUM *b, ASN1_INTEGER *ai);
-CA_DB *load_index(char *dbfile, DB_ATTR *dbattr);
-int index_index(CA_DB *db);
-int save_index(const char *dbfile, const char *suffix, CA_DB *db);
-int rotate_index(const char *dbfile,
-                 const char *new_suffix, const char *old_suffix);
-void free_index(CA_DB *db);
-int index_name_cmp(const char **a, const char **b);
-int parse_yesno(const char *str, int def);
-
-X509_NAME *parse_name(char *str, long chtype, int multirdn);
+extern const char* CertGetStatusString(CertStatus status);
 
 #ifdef __cplusplus
 }

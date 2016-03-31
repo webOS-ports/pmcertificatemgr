@@ -63,7 +63,7 @@ void printUsage(char *usageList[], int number);
 
 #define MAIN_TEST_LIST_SIZE 9
 char *mainTestList[MAIN_TEST_LIST_SIZE] =
-  {
+{
     "a: Direct API manipulation",
     "c: Configuration information...",
     "d: Database manipulation",
@@ -73,9 +73,10 @@ char *mainTestList[MAIN_TEST_LIST_SIZE] =
     "q: quit",
     "r: Raw package information",
     "x: X.509 information",
-  };          
+};
 
-void usage() {
+void usage()
+{
 	fprintf(stderr,"usage: PmCertificateMgr [-v] [/path/to/openssl.cnf]\n");
 	exit(1);
 }
@@ -92,7 +93,7 @@ int main(int argc, char **argv)
   char *confpath = "/etc/ssl/openssl.cnf";
       // Needs to be configured to wherever @WEBOS_INSTALL_SYSCONFDIR@
       // points.  Pass as run-time parameter to override.
-  
+
   while(argcnt < argc) {
       switch(argv[argcnt][0]) {
 	  case '-':
@@ -111,15 +112,15 @@ int main(int argc, char **argv)
       }
       argcnt++;
   }
-		
-	
+
+
     if (0 != (rValue = (CertInitCertMgr(confpath))))
     {
       fprintf(stderr,
 	"ERROR: Couldn't initialize the manager using conf file %s\n",confpath);
       PRINT_RETURN_CODE(rValue);
     }
-  
+
   while (1)
     {
       char cmdBuf[1024];
@@ -129,19 +130,19 @@ int main(int argc, char **argv)
       char param2[64], *param2p;
       char param3[64], *param3p;
       int result;
-      
+
       printf("%08d> ", cmdNum++);
-      
+
       memset((void *)cmdBuf, 0, MAX_CERT_PATH);
-      
+
       gets(cmdBuf);
       cmd[0] = 0;
       nOpts = sscanf(cmdBuf, "%s %s %s %s", cmd, param1, param2, param3);
-      
+
       if (verbose)
         printf("%s\n", cmdBuf);
       result = CERT_OK;
-      
+
       param1p = param2p = param3p = NULL;
       if (1 <  nOpts)
         {
@@ -154,7 +155,7 @@ int main(int argc, char **argv)
                 param3p = param3;
               }
           }
-        }                
+        }
 
       if (!nOpts)
         {
@@ -165,7 +166,7 @@ int main(int argc, char **argv)
         {
         case 'a': // test API directly
           result = testAPI(param1p, param2p, param3p, cmdBuf);
-          printf("API %s: %s (%d)\n", param1p, 
+          printf("API %s: %s (%d)\n", param1p,
                  (result < CERT_MAX_RETURN_CODE) ?
                  strErrorNames[result] : "UNKNOWN",
                  result);
@@ -174,7 +175,7 @@ int main(int argc, char **argv)
         case 'c': // configuration details
           displayConfigDetail(param1p, param2p);
           break;   // configuration details
-          
+
         case 'd':  // Database manipulation
           result = tcert_TestDatabase(param1p, param2p, param3p);
           break;
@@ -182,7 +183,7 @@ int main(int argc, char **argv)
         case 'h':  // h[elp]
           printUsage(mainTestList, MAIN_TEST_LIST_SIZE);
           break;   // help
-          
+
           /* installation goes from default package dir
            * to default destination dirs
            */
@@ -193,25 +194,25 @@ int main(int argc, char **argv)
         case 'p':  // private keys
           tcert_PrivatekeyInfo(param1p, param2p, param3p);
           break;
-          
+
         case 'q':
           exit(0);
           break;
-          
+
         case 'r': // raw package information
           tcert_RawPackageInfo(param1p, param2p, param3p);
           break; // raw package information
-          
+
         case 'x': // x[509 certificate information]
           tcert_X509PackageInfo(param1p, param2p, param3p);
           break; // x[509 certificate information]
-          
+
         default:
           cmdNum--;
           break;
         }  // switch(cmdBuf[0])
       PRINT_RETURN_CODE(result);
-      
+
     }
   return 0;
 }
@@ -230,14 +231,14 @@ void tcert_PrintConfigInfo(unsigned int min, unsigned int max)
 {
   int i;
   char str[MAX_CERT_PATH];
-  
+
   if (max > CERTCFG_MAX_PROPERTY)
     max = CERTCFG_MAX_PROPERTY;
-  
+
   for (i = min; i < max; i++)
     {
       int rValue;
-      
+
       if (CERT_OK == (rValue = CertCfgGetObjectStrValue(i, str,
                                                          MAX_CERT_PATH)))
         printf("%s = %s\n", strPropNames[i], str);
@@ -261,15 +262,15 @@ void tcert_printDatabase(void)
 {
   int i;
   char database[MAX_CERT_PATH];
-  
-  if (CERT_OK == 
+
+  if (CERT_OK ==
       (i = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
                                      database, MAX_CERT_PATH)))
     {
       char dbItem[MAX_CERT_PATH];
-      
+
       FILE *fp = fopen(database, "r");
-      
+
       if (fp)
         {
           while (fgets(dbItem, MAX_CERT_PATH, fp))
@@ -298,13 +299,13 @@ void tcert_DumpPKCS12(char *name)
 {
   char pkcsDir[MAX_CERT_PATH];
   int i;
-  if (CERT_OK == 
+  if (CERT_OK ==
       (i = CertCfgGetObjectStrValue(CERTCFG_PACKAGE_DIR,
                                      pkcsDir, MAX_CERT_PATH)))
     {
       char pkgPath[MAX_CERT_PATH];
       //      FILE *fp;
-      
+
       sprintf(pkgPath, "%s/%s", pkcsDir, name);
       tcert_DumpPKCS12(pkgPath);
     }
@@ -374,7 +375,7 @@ void tcert_ListDirExt(char *dir, char *ext, int level)
 /*                                                                           */
 /*****************************************************************************/
 
-/* 
+/*
  * Name strings are found in cert_debug.h
  */
 
@@ -545,7 +546,7 @@ int testAPI(char *ApiName, char *param1, char* param2, char *param3)
     case CERT_REMOVE_CERTIFICATE:
       {
         int certID;
-        
+
         if (NULL != param1)
           {
             sscanf(param1, "%X", &certID);
@@ -606,47 +607,47 @@ int displayConfigDetail(char *configOption, char *configUpdate)
     {
       //      char str[MAX_CERT_PATH];
       //int rValue;
-      
+
     case 'a': /* "\tc a[ll]: all configuration data", */
       tcert_PrintConfigInfo(0, CERTCFG_MAX_PROPERTY);
       break;
-      
+
     case 'f': /* "\tc f[ile] <new>: configuration file name", */
       tcert_PrintConfigInfo(CERTCFG_CONFIG_FILE,
                             CERTCFG_CONFIG_FILE + 1);
       if (NULL != configUpdate)
         {
           CertCfgSetObjectStrValue(CERTCFG_CONFIG_FILE,
-                                    configUpdate); 
+                                    configUpdate);
           printf("\tChanged to\n");
           tcert_PrintConfigInfo(CERTCFG_CONFIG_FILE,
                                 CERTCFG_CONFIG_FILE + 1);
         }
       break;
-      
+
     case 'n': /* "\tc n[ame] <new>: The configuration name", */
       tcert_PrintConfigInfo(CERTCFG_CONFIG_NAME,
                             CERTCFG_CONFIG_NAME + 1);
       if (NULL != configUpdate)
         {
           CertCfgSetObjectStrValue(CERTCFG_CONFIG_NAME,
-                                    configUpdate); 
+                                    configUpdate);
           printf("\tChanged to\n");
           tcert_PrintConfigInfo(CERTCFG_CONFIG_NAME,
                                 CERTCFG_CONFIG_NAME + 1);
         }
       break;
-      
+
     case 'p': /* "\tc p[rivate]: The private key directory", */
       tcert_PrintConfigInfo(CERTCFG_PRIVATE_KEY_DIR,
                             CERTCFG_PRIVATE_KEY_DIR + 1);
       break;
-      
+
     case 'r': /* "\tc r[oot]: The root directory", */
       tcert_PrintConfigInfo(CERTCFG_ROOT_DIR,
                             CERTCFG_ROOT_DIR + 1);
       break;
-      
+
     case 's': /* "\tc s[erial]: the serial number file", */
       tcert_PrintConfigInfo(CERTCFG_CERT_SERIAL,
                             CERTCFG_CERT_SERIAL + 1);
@@ -655,8 +656,8 @@ int displayConfigDetail(char *configOption, char *configUpdate)
       tcert_PrintConfigInfo(CERTCFG_TRUSTED_CA_DIR,
                             CERTCFG_TRUSTED_CA_DIR + 1);
       break;
-      
-      
+
+
     case 'x': /* "\tc x: reread the configuration", */
       // purposefully don't check the parameter
       // to allow bogus values
@@ -667,7 +668,7 @@ int displayConfigDetail(char *configOption, char *configUpdate)
           PRINT_RETURN_CODE(result);
         }
       break;
-      
+
     default:
       printUsage(configDetailList, CONFIG_DETAIL_LIST_SIZE);
     } return 0;
@@ -685,7 +686,7 @@ int displayConfigDetail(char *configOption, char *configUpdate)
 /*****************************************************************************/
 
 #define  DATABASE_DETAIL_LIST_SIZE 5
-char *databaseDetailList[DATABASE_DETAIL_LIST_SIZE] = 
+char *databaseDetailList[DATABASE_DETAIL_LIST_SIZE] =
   {
       "Available install functions:",
       "\tdb c[ertificate] <status> [file]: list the certificates by status",
@@ -715,7 +716,7 @@ int tcert_TestDatabase(char *dbCmd, char *param1, char *param2)
         int certList[100];
         int certNb = 100;
         int i;
-        
+
         if (NULL != param1)
           statusSwitch = tcert_resolveStatusSwitch(param1[0]);
 
@@ -728,7 +729,7 @@ int tcert_TestDatabase(char *dbCmd, char *param1, char *param2)
           {
             result = CertListDatabaseCertsByStatus(statusSwitch,
                                                    certList, &certNb);
-            
+
           }
 
         if (CERT_OK == result)
@@ -741,7 +742,7 @@ int tcert_TestDatabase(char *dbCmd, char *param1, char *param2)
       {
         int i;
         int items;
-        
+
         result = CertGetDatabaseInfo(CERT_DATABASE_SIZE, &items);
         for (i = 0; i < items; i++)
           {
@@ -752,7 +753,7 @@ int tcert_TestDatabase(char *dbCmd, char *param1, char *param2)
             char startStr[128];
             char endStr[128];
             char installStr[128];
-            
+
             result = CertGetDatabaseStrValue(i, CERT_DATABASE_ITEM_STATUS,
                                       propStr, 128);
             result = CertGetDatabaseStrValue(i, CERT_DATABASE_ITEM_FILE,
@@ -777,7 +778,7 @@ int tcert_TestDatabase(char *dbCmd, char *param1, char *param2)
               }
             else
               {
-                fprintf(stdout, 
+                fprintf(stdout,
                         "Certificate %s: <%s><%s>\n",
                         serlStr, propStr, fileStr);
               }
@@ -790,7 +791,7 @@ int tcert_TestDatabase(char *dbCmd, char *param1, char *param2)
         if (NULL == param1)
           {
             char dbfile[MAX_CERT_PATH];
-            
+
             result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
                                               dbfile, MAX_CERT_PATH);
             if (CERT_OK != result)
@@ -813,7 +814,7 @@ int tcert_TestDatabase(char *dbCmd, char *param1, char *param2)
         if (NULL == param1)
           {
             char dbfile[MAX_CERT_PATH];
-            
+
             result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
                                               dbfile, MAX_CERT_PATH);
             if (CERT_OK != result)
@@ -847,7 +848,7 @@ int tcert_TestDatabase(char *dbCmd, char *param1, char *param2)
 /*****************************************************************************/
 
 #define  INSTALL_DETAIL_LIST_SIZE 5
-char *installDetailList[INSTALL_DETAIL_LIST_SIZE] = 
+char *installDetailList[INSTALL_DETAIL_LIST_SIZE] =
   {
       "Available install functions:",
       "\ti d[elete] <pkg_serial#>: delete the given package",
@@ -859,7 +860,7 @@ char *installDetailList[INSTALL_DETAIL_LIST_SIZE] =
 /*****************************************************************************/
 
 #define  INSTALL_RAW_DETAIL_LIST_SIZE 5
-char *installRawDetailList[INSTALL_RAW_DETAIL_LIST_SIZE] = 
+char *installRawDetailList[INSTALL_RAW_DETAIL_LIST_SIZE] =
   {
     "*\t\ti r a <pkg>: insert a authorized certificate",
     "*\t\ti r c <pkg>: insert a certificate",
@@ -874,7 +875,7 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
   //  char serialFile[MAX_CERT_PATH];
   int rValue; //, nOpts;
   int serialNb;
-  
+
   if (NULL == opt)
     {
       printf("Install option not named\n");
@@ -887,7 +888,7 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
       printUsage(installDetailList, INSTALL_DETAIL_LIST_SIZE);
       return;
     }
-  
+
   switch(opt[0])
     {
     case 'd':  // delete an installed package
@@ -897,29 +898,27 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
 	else {
 		serialNb = atoi(param1);
 	}
-		
+
 	printf("deleting #%d\n",serialNb);
 	rValue = CertRemoveCertificate(serialNb);
 	PRINT_RETURN_CODE(rValue);
-	
+
       break;
-      
+
     case 'i':  // install the package
-      
+
       if (CERT_OK ==
-          (rValue = CertCfgGetObjectValue(CERTCFG_CERT_SERIAL,
-                                           &serialNb)))
+          (rValue = CertInstallKeyPackage(param1,
+                                          NULL,
+                                          "Help Im a Rock", &serialNb)))
         {
           printf("installing %s (#%d)\n", param1, serialNb);
-          rValue = CertInstallKeyPackage(param1,
-                                          NULL,
-                                          "Help Im a Rock", &serialNb);
           PRINT_RETURN_CODE(rValue);
 
 	  printf("Authorizing %s (#%d)\n", param1, serialNb);
 	  rValue = CertAddAuthorizedCert(serialNb);
           PRINT_RETURN_CODE(rValue);
-	  
+
         }
       else
         {
@@ -927,7 +926,7 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
           PRINT_RETURN_CODE(rValue);
         }
       break;
-      
+
     case 'r': // insert unexploded file (raw) into its default dir
       if (NULL == param2)
         {
@@ -941,7 +940,7 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
           { char rawDir[64];
             //            char rawFile[64];
             struct stat statBuf;
-            
+
             rValue = CertCfgGetObjectStrValue(CERTCFG_PACKAGE_DIR,
                                                rawDir,
                                                MAX_CERT_PATH);
@@ -962,7 +961,7 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
             else
               {
                 char rawFile[64];
-                
+
                 sprintf(rawFile, "%s/%s", rawDir, basename(param2));
                 if (-1 == rename(param2, rawFile))
                   {
@@ -971,20 +970,20 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
               }
           }
           break;
-          
+
         case 'a':
         case 'c':
         case 'p':
         case 's':
           printf("UNIMPLEMENTED\n");
           break;
-          
+
         default:
           printUsage(installRawDetailList, INSTALL_RAW_DETAIL_LIST_SIZE);
           break;
         }
       break;
-      
+
     case 's':  // check the serial number possibly increment
       if (CERT_OK ==
           (rValue = CertCfgGetObjectStrValue(CERTCFG_CERT_SERIAL,
@@ -992,11 +991,11 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
                                               MAX_CERT_PATH)))
         {
           //          printf("Lock file == %d\n", CertLockFile(0));
-          
+
           if ('i' == param1[0])
             {
               fprintf(stdout, "CALL 4\n");
-              
+
               rValue = CertGetSerialNumberInc(pkgName, 1);
             }
           else
@@ -1007,7 +1006,7 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
       else
         printf("Unavailable serial number file (%d)\n", rValue);
       break;
-      
+
     default:
       printUsage(installDetailList, INSTALL_DETAIL_LIST_SIZE);
       break;
@@ -1025,7 +1024,7 @@ void tcert_InstallPackage(char *opt, char *param1, char *param2)
 /*****************************************************************************/
 
 #define PKEY_INFO_LIST_SIZE 3
-char *pKeyInfoList[PKEY_INFO_LIST_SIZE] = 
+char *pKeyInfoList[PKEY_INFO_LIST_SIZE] =
   {
     "Available private key information:",
     "\tp d[nfo] <key>: dump information on the given key",
@@ -1040,7 +1039,7 @@ void tcert_PrivatekeyInfo(char *pKeyOption,
   char privDir[MAX_CERT_PATH];
   //char privKeyName[MAX_CERT_PATH];
   int rValue;
-  
+
   if (NULL == pKeyOption)
     {
       printUsage(pKeyInfoList, PKEY_INFO_LIST_SIZE);
@@ -1055,7 +1054,7 @@ void tcert_PrivatekeyInfo(char *pKeyOption,
       else
         printf("UNIMPLEMENTED\n");
       break;
-      
+
     case 'l':  // list private keys
       if (CERT_OK ==
           (rValue = CertCfgGetObjectStrValue(CERTCFG_PRIVATE_KEY_DIR,
@@ -1064,7 +1063,7 @@ void tcert_PrivatekeyInfo(char *pKeyOption,
       else
         printf("Unavailable private key dir\n");
       break;
-      
+
     default:
       printUsage(pKeyInfoList, PKEY_INFO_LIST_SIZE);
       break;
@@ -1084,7 +1083,7 @@ void tcert_PrivatekeyInfo(char *pKeyOption,
 /*****************************************************************************/
 
 #define RAW_FILE_INFO_LIST_SIZE 3
-char *rawFileInfoList[RAW_FILE_INFO_LIST_SIZE] = 
+char *rawFileInfoList[RAW_FILE_INFO_LIST_SIZE] =
   {
     "Available raw package (r) queries:",
     "\tr l[ist]: list all packages (pem, p12, pfx, der)",
@@ -1095,20 +1094,20 @@ void tcert_RawPackageInfo(char *rawOpt, char *pkgName, char *param3p)
 {
   char rawDir[MAX_CERT_PATH];
   int rValue; //, nOpts;
-  
+
   if (NULL == rawOpt)
     {
       printf("ERROR: Raw file option not set\n");
       printUsage(rawFileInfoList, RAW_FILE_INFO_LIST_SIZE);
       return;
     }
-  
+
   switch(rawOpt[0])
     {
     case 'd':
       {
         int fType = returnFileType(pkgName);
-        
+
         switch(fType)
           {
           case CERT_P12_FILE:
@@ -1121,7 +1120,7 @@ void tcert_RawPackageInfo(char *rawOpt, char *pkgName, char *param3p)
           }
       }
       break;
-      
+
     case 'l':  // l[ist raw packages]
       if (CERT_OK ==
           (rValue = CertCfgGetObjectStrValue(CERTCFG_PACKAGE_DIR,
@@ -1139,7 +1138,7 @@ void tcert_RawPackageInfo(char *rawOpt, char *pkgName, char *param3p)
       else
         printf("ERROR: Unavailable package dir (errno == %d)\n", rValue);
       break;
-      
+
     default:
       printUsage(rawFileInfoList, RAW_FILE_INFO_LIST_SIZE);
     }
@@ -1166,7 +1165,7 @@ char *x509InfoList[] =
   };
 
 #define X509_EXPLODE_LIST_SIZE 2
-char *x509ExplodeList[X509_EXPLODE_LIST_SIZE] = 
+char *x509ExplodeList[X509_EXPLODE_LIST_SIZE] =
   {
     "\t\tx x a <pkg>: dump everything",
     "\t\tx x i <pkg>: issuer"
@@ -1188,7 +1187,7 @@ char *x509ExplodePropertyList[X509_EXPLODE_PROPERTY_LIST_SIZE] =
 
 #define X509_PROPERTY_NAME_LIST_SIZE 10
 
-char *x509PropertyNameList[X509_PROPERTY_NAME_LIST_SIZE] = 
+char *x509PropertyNameList[X509_PROPERTY_NAME_LIST_SIZE] =
 {
   "CERTX509_ISSUER_ORGANIZATION_NAME",
   "CERTX509_ISSUER_COMMON_NAME",
@@ -1207,19 +1206,19 @@ void tcert_X509PackageInfo(char *certOpt, char *explodeProp, char *certFile)
 {
   //  char param1[MAX_CERT_PATH];
   //char param2[MAX_CERT_PATH];
-  
+
   if (NULL == certOpt)
     {
       printUsage(x509InfoList, X509_INFO_LIST_SIZE);
       return;
     }
-  
+
   switch (certOpt[0])
     {
     case 'd':  // d[atabase of current certificates]
       tcert_printDatabase();
       break;
-      
+
     case 'i':  // i[nstall] and validate a certificate
       if (NULL == explodeProp)
         {
@@ -1235,10 +1234,10 @@ void tcert_X509PackageInfo(char *certOpt, char *explodeProp, char *certFile)
 
           if (0 != serial)
             CertAddAuthorizedCert(serial);
-          
+
         }
       break;
-      
+
     case 's':  // s[erial number]
       printf("UNIMPLEMENTED\n");
       break;
@@ -1258,10 +1257,10 @@ void tcert_X509PackageInfo(char *certOpt, char *explodeProp, char *certFile)
 
           if (0 != serial)
             CertValidateCertificate(serial);
-          
+
         }
       break;
-      
+
     case 'x': // x[plode] the given certificate
       if (NULL == explodeProp)
         {
@@ -1281,14 +1280,14 @@ void tcert_X509PackageInfo(char *certOpt, char *explodeProp, char *certFile)
           unsigned int result;
           int property = CERTX509_UNKNOWN_PROPERTY;
           char propertyStr[64];
-          
+
           fileType = returnFileType(certFile);
           switch (fileType)
             {
             case CERT_PEM_FILE:
               result = CertPemToX509(certFile, &cert);
               break;
-              
+
             default:
               printf("ERROR: Illegal file type for %s (%d)\n",
                      certFile, fileType);
@@ -1304,31 +1303,31 @@ void tcert_X509PackageInfo(char *certOpt, char *explodeProp, char *certFile)
             case 'b': // Begining of certificate period
               property = CERTX509_START_DATE;
               break;
-              
+
             case 'e': // End of certificate period
               property = CERTX509_EXPIRATION_DATE;
               break;
-              
+
             case 'i': // issuer
               property = CERTX509_ISSUER_COMMON_NAME;
               break;
-              
+
             case 'o': // subject Org
               property = CERTX509_SUBJECT_ORGANIZATION_NAME;
               break;
-              
+
             case 'O': // issuer Org
               property = CERTX509_ISSUER_ORGANIZATION_NAME;
               break;
-              
+
             case 's': // subject common name
               property = CERTX509_SUBJECT_COMMON_NAME;
               break;
-              
+
             case 'S': // subject Surname
               property = CERTX509_SUBJECT_SURNAME;
               break;
-              
+
             case 'u': // subject organization unit
               property = CERTX509_SUBJECT_ORGANIZATION_UNIT_NAME;
               break;
@@ -1337,20 +1336,13 @@ void tcert_X509PackageInfo(char *certOpt, char *explodeProp, char *certFile)
               property = CERTX509_ISSUER_ORGANIZATION_UNIT_NAME;
               break;
             }
-          
+
           if (property == CERTX509_UNKNOWN_PROPERTY)
             {
               printf("ERROR: Unknown property %s\n", explodeProp);
               printUsage(x509ExplodePropertyList, X509_EXPLODE_PROPERTY_LIST_SIZE);
               result = CERT_UNKNOWN_PROPERTY;
            }
-          else if ((CERTX509_START_DATE == property) ||
-                   (CERTX509_EXPIRATION_DATE == property))
-            {
-              result = CertX509ReadTimeProperty(cert,
-                                                property,
-                                                propertyStr, 64);
-            }
           else
             {
               result = CertX509ReadStrProperty(cert,
@@ -1367,7 +1359,7 @@ void tcert_X509PackageInfo(char *certOpt, char *explodeProp, char *certFile)
             PRINT_RETURN_CODE(result);
         }
       break;
-      
+
     default:
       printUsage(x509InfoList, X509_INFO_LIST_SIZE);
       break;

@@ -24,11 +24,10 @@
 #define __CERT_X509_H__
 
 #include <sys/types.h>
-
 #include <openssl/x509.h>
 
 typedef enum
-  {
+{
     CERTX509_ISSUER_ORGANIZATION_NAME,
     CERTX509_ISSUER_COMMON_NAME,
     CERTX509_ISSUER_ORGANIZATION_UNIT_NAME,
@@ -36,10 +35,10 @@ typedef enum
     CERTX509_ISSUER_COUNTRY,
     CERTX509_ISSUER_STATE,
     CERTX509_ISSUER_LOCATION,
-    
+
     CERTX509_SUBJECT_ORGANIZATION_NAME,
     CERTX509_SUBJECT_COMMON_NAME,
-    CERTX509_SUBJECT_ALT_NAME, //ALT NAME
+    CERTX509_SUBJECT_ALT_NAME,
     CERTX509_SUBJECT_ORGANIZATION_UNIT_NAME,
     CERTX509_SUBJECT_SURNAME,
     CERTX509_SUBJECT_COUNTRY,
@@ -49,25 +48,18 @@ typedef enum
     CERTX509_START_DATE,
     CERTX509_EXPIRATION_DATE,
     CERTX509_UNKNOWN_PROPERTY
-  } X509Properties;
+} X509Properties;
 
 #ifdef __cplusplus
-extern "C"
-{
+extern "C" {
 #endif
 
-int CertX509ReadStrProperty(X509 *cert, int property, char *pBuf, int len);
-int checkCert(X509 *cert, char *CAFile, char *CAPath);
-int CertX509ReadTimeProperty(X509 *cert, int property, char *pBuf, int len);
+extern CertReturnCode CertX509ReadStrProperty(const X509 *cert, X509Properties property, char *o_buf, int len);
 
-void CertX509Dump(X509 *cert);
+extern CertReturnCode checkCert(const X509 *cert, const char *ca_file, const char *ca_path);
 
 #ifdef __cplusplus
 }
 #endif
 
-#ifndef MIN
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#endif
-
-#endif //  __CERT_X509_H__
+#endif /* __CERT_X509_H__ */

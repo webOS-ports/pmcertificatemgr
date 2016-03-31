@@ -16,25 +16,27 @@
 #
 # LICENSE@@@
 
-libPmCertificateMgr {                                                                                                                                         
-    global:
+libPmCertificateMgr {
+	global:
 	# cert_cfg.h
 	CertCfgOpenConfigFile;
 	CertCfgSetObjectValue;
 	CertCfgGetObjectValue;
 	CertCfgSetObjectStrValue;
 	CertCfgGetObjectStrValue;
-	CertCfgResolveConfigValue;
 
 	# cert_db.h
-	CertReadDatabase;
 	CertInitDatabase;
+	CertReadDatabase;
+	CertWriteDatabase;
 	CertGetDatabaseInfo;
 	CertGetDatabaseStrValue;
+	CertCreateDatabaseItemDirect;
 	CertCreateDatabaseItem;
+	CertUpdateDatabaseItemDirect;
 	CertUpdateDatabaseItem;
-	CertWriteDatabase;
 	CertDatabaseCountCertsDirect;
+	CertDatabaseCountCerts;
 	CertListDatabaseCertsByStatusDirect;
 	CertListDatabaseCertsByStatus;
 	CertGetNameFromSerialNumberDirect;
@@ -44,56 +46,49 @@ libPmCertificateMgr {
 	strProps;
 	strPropNames;
 	strErrorNames;
+	CertX509Dump;
+	CertPKCS12Dump;
+	initSSLErrors;
+	logSSLErrors;
 
 	# cert_mgr.h
-	CertAddAuthorizedCert;
-	CertAddTrustedCert;
-	CertGetCertificateCount;
-	CertGetCertificateCountDirect;
-	CertMakeCertIter;
-	CertDeleteCertIter;
-	CertGetNextCert;
-	CertValidateCert;
-	CertGetAuthorizedCertInfo;
-	CertGetAuthorizedCertInfoField;
+	SetupCertMgrEnviroment;
+	CertInitCertMgr;
+	CertResetConfig;
+	CertReadKeyPackageDirect;
 	CertInstallKeyPackageDirect;
 	CertInstallKeyPackage;
-	CertAddClientCert;
+	CertRemoveCertificateDirect;
 	CertRemoveCertificate;
-	CertGetClientCertCount;
-	CertMakeClientCertIter;
-	CertDeleteClientCertIter;
-	CertGetNextClientCert;
-	CertGetClientCertDirectory;
-	CertGetClientCertKey;
-	CertValidateClientCert;
-	CertGetCertInfo;
-	CertGetClientCertInfoField;
+	CertGetCertificateCountDirect;
+	CertGetCertificateCount;
+	CertAddAuthorizedCert;
+	CertAddTrustedCert;
+	CertValidateCertificate;
 	CertPemToX509;
 	CertGetX509;
-	CertValidateCertPath;
-	CertInitCertMgr;
-	CertReadKeyPackageDirect;
-	CertInstallPackageDirect;
-	CertValidateCertificate;
-	CertResetConfig;
-	returnFileType;
-
-	# cert_mgr_prv.h
-	makePathToCert;
 
 	# cert_utils.h
+	cmutils_ip2str;
+	cmutils_strdsvcat;
+	getTimeString;
+	checkCertDates;
 	CertGetSerialNumber;
 	CertGetSerialNumberInc;
+	CertInitLockFiles;
 	CertLockFile;
 	CertUnlockFile;
-	CertInitLockFiles;
+	makePath;
+	cmutils_mkdirp;
+	cmutils_touchp;
+	cmutils_rmdeadlinks;
+	cmutils_exists;
+	cmutils_gzip;
+	cmutils_memdup;
 
 	# cert_x509.h
 	CertX509ReadStrProperty;
 	checkCert;
-	CertX509ReadTimeProperty;
-	CertX509Dump;
 
-    local:  *;                                                                                                                                         
+	local:  *;
 };
