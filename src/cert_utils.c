@@ -566,7 +566,7 @@ int getPrivKeyType(EVP_PKEY *pkey)
 {
   int rValue = CERT_OBJECT_MAX_OBJECT;
 
-  switch (EVP_PKEY_type(pkey->type))
+  switch (EVP_PKEY_type(pkey))
     {
     case EVP_PKEY_RSA:
       rValue = CERT_OBJECT_RSA_PRIVATE_KEY;
