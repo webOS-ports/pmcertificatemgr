@@ -102,9 +102,8 @@ int CertPKCS12Dump(char *pPkgPath)
                 	  result = CertCfgGetObjectStrValue(CERTCFG_PRIVATE_KEY_DIR,
                                                destPath, MAX_CERT_PATH);
                       printf("PKEY->type = %s (%d)\n",
-                             encryptNames[pkey->type], pkey->type);
-                      printf("PKEY->save_type = 0x%x\n", pkey->save_type);
-                      EVP_PKEY_free(pkey );
+                             encryptNames[EVP_PKEY_type(pkey)], EVP_PKEY_type(pkey));
+                      EVP_PKEY_free(pkey);
                     }
                   if (NULL != cert)
                     {

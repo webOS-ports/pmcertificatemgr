@@ -1586,7 +1586,7 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 		fp = fopen(pkeyPath, "w");
 		switch (keyType) {
 		    case CERT_OBJECT_RSA_PRIVATE_KEY:
-			PEM_write_RSAPrivateKey(fp, (RSA *)pkey->pkey.rsa,
+			PEM_write_RSAPrivateKey(fp, EVP_PKEY_get0_RSA(pkey),
 				(const EVP_CIPHER *)pcbk, NULL, 0, 0, pass);
 			certInstalled++;
 			break;
@@ -1603,7 +1603,7 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 			FILE *pfp;
 			if (NULL != (pfp = fopen(destPath, "a"))) {
 			    PEM_write_ECPrivateKey(pfp,
-				(EC_KEY *)pkey->pkey.ec,
+				EVP_PKEY_get0_EC_KEY(pkey),
 				    NULL, NULL, 0, 0, NULL);
 			    fclose(pfp);
 			} else {
