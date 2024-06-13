@@ -23,7 +23,6 @@ project(PmCertificateMgr C)
 include(webOS/webOS)
 webos_modules_init(1 0 0 QUALIFIER RC2)
 webos_component(2 0 0)
-webos_machine_impl_dep()
 
 webos_build_pkgconfig()
 
@@ -40,11 +39,6 @@ include_directories(include/public)
 webos_add_compiler_flags(ALL -Wall -O0 -g)
 webos_add_linker_options(ALL --version-script=${CMAKE_SOURCE_DIR}/src/PmCertificateMgrExports.map)
 webos_add_linker_options(ALL --no-undefined -O0 -g)
-
-if(${WEBOS_TARGET_MACHINE_IMPL} STREQUAL simulator)
-	webos_add_compiler_flags(ALL  -fno-exceptions)
-	webos_add_linker_options(ALL  -fno-exceptions)
-endif()
 
 add_definitions(-DCERT_DEF_CONF_FILE="${WEBOS_INSTALL_SYSCONFDIR}/ssl/openssl.cnf")
 
