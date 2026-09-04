@@ -45,16 +45,6 @@
 #include "cert_db.h"
 #include "cert_debug.h"
 
-/* workaround for missing OPENSSL_PSTRING type in openssl-0.9.8k
- * TODO: remove when support for openssl-0.9.8k not needed (>openssl-1.0.0i used)
- */
-#ifndef sk_OPENSSL_PSTRING_num
-#  define sk_OPENSSL_PSTRING_num sk_num
-#endif
-#ifndef sk_OPENSSL_PSTRING_value
-#  define sk_OPENSSL_PSTRING_value sk_value
-#endif
-
 int CertLockFile(int fileType);
 int CertUnlockFile(int fileType);
 

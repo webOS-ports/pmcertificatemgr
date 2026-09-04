@@ -21,42 +21,13 @@
 /*****************************************************************************/
 #include <stdio.h>
 
+#include <openssl/objects.h>
 #include <openssl/pkcs12.h>
 
 #include "cert_mgr.h"
 #include "cert_cfg.h"
 #include "cert_x509.h"
 
-/* taken from openssl/crypto/objects/objects.h */
-#define ENCRYPT_NAME_MAX 25
-const char *encryptNames[ENCRYPT_NAME_MAX] = 
-  {
-    "undefined",
-    "rsadsi",
-    "pkcs",
-    "md2",
-    "md5",
-    "rc4",
-    "rsaEncryption",
-    "m2dWithRSAEncryption",
-    "md5WithRSAEncryption",
-    "pbeWithMD2AndDES-CBC",
-    "pbeWithMD5AndDES-CBC",
-    "X500",
-    "X509",
-    "CommonName",
-    "CountryName",
-    "locality",
-    "State",
-    "Organization",
-    "OrganizationUnitName",
-    "RSA",
-    "pkcs7",
-    "pkcs7-data",
-    "pkcs7-signedData",
-    "pkcs7-envelopeData",
-    "pkcs7-signedAndEnvelopedData",
-  };
 
 /*****************************************************************************/
 /*                                                                           */
@@ -101,8 +72,10 @@ int CertPKCS12Dump(char *pPkgPath)
                     {
                 	  result = CertCfgGetObjectStrValue(CERTCFG_PRIVATE_KEY_DIR,
                                                destPath, MAX_CERT_PATH);
+                      int pkeyType = EVP_PKEY_base_id(pkey);
+
                       printf("PKEY->type = %s (%d)\n",
-                             encryptNames[EVP_PKEY_type(pkey)], EVP_PKEY_type(pkey));
+                             OBJ_nid2sn(pkeyType), pkeyType);
                       EVP_PKEY_free(pkey);
                     }
                   if (NULL != cert)
