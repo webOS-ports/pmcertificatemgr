@@ -35,6 +35,11 @@
 /* Bundle location can be overridden with $CA_BUNDLE_DIR.                     */
 /*****************************************************************************/
 
+/* nftw() and friends: must precede every system header */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +48,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <ftw.h>
 
 #include "cert_mgr.h"
 #include "cert_cfg.h"
@@ -76,6 +82,13 @@ static int cmpStr(const void *a, const void *b)
 }
 
 /* Lay down a self-contained store plus the openssl.cnf that describes it. */
+static int unlinkOne(const char *path, const struct stat *sb, int flag,
+                    struct FTW *ftw)
+{
+    (void)sb; (void)flag; (void)ftw;
+    return remove(path);
+}
+
 static int makeStore(const char *root, char *cnfPath, size_t cnfPathLen)
 {
     static const char *dirs[] = {
@@ -85,6 +98,18 @@ static int makeStore(const char *root, char *cnfPath, size_t cnfPathLen)
     char path[MAX_CERT_PATH];
     FILE *f;
     int i;
+
+    /* start from nothing, so the test is re-runnable against a build tree
+     * ctest has already used */
+    if ((NULL == root) || ('\0' == root[0]) || (0 == strcmp(root, "/"))) {
+        fprintf(stderr, "refusing to reset '%s'\n", root ? root : "(null)");
+        return -1;
+    }
+    if ((0 != nftw(root, unlinkOne, 16, FTW_DEPTH | FTW_PHYS)) &&
+        (ENOENT != errno)) {
+        perror(root);
+        return -1;
+    }
 
     if ((0 != mkdir(root, 0755)) && (EEXIST != errno)) {
         perror("mkdir store root");
