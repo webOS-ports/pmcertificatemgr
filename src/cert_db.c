@@ -679,12 +679,16 @@ CertReturnCode_t CertUpdateDatabaseItem(char *dbName,
 
       for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++)
 		{
-          int32_t dbSerialNb;
+          unsigned int dbSerialNb = 0;
 
           pp = (char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
 
-          sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb);
-          if (dbSerialNb == serialNb)
+          if (1 != sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb))
+            {
+              pp = NULL;
+              continue;
+            }
+          if ((int32_t)dbSerialNb == serialNb)
             {
               break;
             }
@@ -847,16 +851,23 @@ CertReturnCode_t CertListDatabaseCertsByStatusDirect(char *dbName,
           if ((CERT_STATUS_ALL == certStatus)  ||
               (pp[CERT_DATABASE_ITEM_STATUS][0] == statusValues[certStatus]))
             {
-              //              fprintf(stdout, "captured serial #%s\n",
-              //      pp[CERT_DATABASE_ITEM_SERIAL]);
-              sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &(certList[i]));
+              unsigned int dbSerialNb;
 
-              if (size == *certNb)
+              /* the bounds check used to happen *after* the write, and the
+               * write was indexed by the database row rather than by the
+               * number of matches collected so far -- both of which overran
+               * the caller's array */
+              if (size >= *certNb)
                 {
                   result = CERT_INSUFFICIENT_BUFFER_SPACE;
                   break;
                 }
-              size++;
+
+              if (1 == sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb))
+                {
+                  certList[size] = (int32_t)dbSerialNb;
+                  size++;
+                }
             }
         }
     }
@@ -942,13 +953,15 @@ CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
 
       for (i = 0; i < nCertsTotal; i++)
 		{
-          int dbSerialNb;
+          unsigned int dbSerialNb = 0;
           const char **pp;
 
           pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
-          sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb);
 
-          if (dbSerialNb == serialNb)
+          if (1 != sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb))
+            continue;
+
+          if ((int32_t)dbSerialNb == serialNb)
             {
               int len;
               //              fprintf(stdout, "captured serial #%s\n",

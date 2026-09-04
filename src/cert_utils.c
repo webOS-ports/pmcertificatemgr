@@ -163,23 +163,28 @@ int CertGetSerialNumber(char *path)
 {
   int fd;
   char inBuf[MAX_CERT_PATH];
-  int rValue;
+  ssize_t nRead;
+  unsigned int serial;
 
   if (0 > (fd = open(path, O_RDONLY)))
     return CERT_FILE_ACCESS_FAILURE;
 
-  rValue = read(fd, inBuf, MAX_CERT_PATH);
-  if(-1 != rValue) {
-    inBuf[rValue] = '\0';
+  /* leave room for the terminator; the old code read MAX_CERT_PATH bytes
+   * and then wrote inBuf[MAX_CERT_PATH], one past the end */
+  nRead = read(fd, inBuf, sizeof(inBuf) - 1);
+  close(fd);
 
-    sscanf(inBuf, "%x", &rValue);
-    close(fd);
-    return rValue;
-  }
-  else {
-    close(fd);
+  if (0 > nRead)
     return CERT_FILE_READ_FAILURE;
-  }
+
+  inBuf[nRead] = '\0';
+
+  /* an unparsable file used to leave the byte count in place and hand it
+   * back as if it were the serial number */
+  if (1 != sscanf(inBuf, "%x", &serial))
+    return CERT_FILE_READ_FAILURE;
+
+  return (int)serial;
 }
 
 /*****************************************************************************/
@@ -211,42 +216,63 @@ int CertGetSerialNumberInc(char *path, int increment)
 {
   int fd;
   char inBuf[MAX_CERT_PATH];
-  int rValue, serial = 0;
+  ssize_t nRead;
+  unsigned int serial = 0;
 
   fd = open(path, O_RDWR);
 
   if (fd < 0 )
     {
-    return 0;
+      return 0;
     }
-  else
+
+  /* leave room for the terminator; inBuf was previously handed to sscanf
+   * without ever being terminated */
+  nRead = read(fd, inBuf, sizeof(inBuf) - 1);
+
+  if (0 > nRead)
     {
-      rValue = read(fd, inBuf, sizeof(inBuf));
-      if (rValue < 0)
+      fprintf(stderr, "Error %d reading certificate serial number\n", errno);
+      close(fd);   /* used to leak the descriptor here */
+      return 0;
+    }
+
+  inBuf[nRead] = '\0';
+
+  if (1 != sscanf(inBuf, "%x", &serial))
+    serial = 0;
+
+  if (serial)
+    {
+      int len;
+
+      printf("Serial is currently %u\n", serial);
+      lseek(fd, 0, SEEK_SET);
+      len = snprintf(inBuf, sizeof(inBuf), "%X ", serial + increment);
+
+      if ((len < 0) || ((size_t)len >= sizeof(inBuf)))
         {
-          fprintf(stderr, "Error %d reading certificate serial number\n", errno);
+          fprintf(stderr, "Serial number too long for %s\n", path);
+          close(fd);
           return 0;
         }
-      sscanf(inBuf, "%x", &serial);
 
-      if (serial)
+      if (ftruncate(fd, 0))
         {
-          printf("Serial is currently %d\n", serial);
-          lseek(fd, 0, SEEK_SET);
-          snprintf(inBuf, sizeof(inBuf), "%X ", serial + increment);
-          if (ftruncate(fd, 0))
-            {
-              fprintf(stderr, "Error %d truncating %s\n", errno, path);
-            }
-          if (4 != write(fd, inBuf, 4))
-            {
-              fprintf(stderr, "Error %d writing to %s\n", errno, path);
-            }
+          fprintf(stderr, "Error %d truncating %s\n", errno, path);
         }
-      close(fd);
 
-      return serial;
+      /* this used to write exactly 4 bytes whatever the serial's width,
+       * corrupting the file for serials outside 3 hex digits */
+      if (len != write(fd, inBuf, len))
+        {
+          fprintf(stderr, "Error %d writing to %s\n", errno, path);
+        }
     }
+
+  close(fd);
+
+  return (int)serial;
 }
 
 
