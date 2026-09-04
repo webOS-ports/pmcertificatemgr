@@ -185,7 +185,7 @@ int Touch(const char *path, const char* data)
     return 0;
 }
 
-CertReturnCode_t SetupCertMgrEnviroment() {
+CertReturnCode_t SetupCertMgrEnviroment(void) {
 	int32_t result = CERT_OK;
 	char dbName[MAX_CERT_PATH];
 //	FILE *ifp;
@@ -824,7 +824,7 @@ CertReturnCode_t CertRemoveCertificateDirect(int32_t serialNb,
 } /*--** CertRemoveCertificate **--*/
 
 
-CertReturnCode_t removeLinkFiles() {
+CertReturnCode_t removeLinkFiles(void) {
 	CertReturnCode_t result = 0;
 	char certPath[64] = {'\0'};
 	gchar* command = NULL;
@@ -1555,6 +1555,10 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
      * caller-supplied path is unused; it stays for prototype compatibility */
     (void)pDestPath;
 
+    /* see the note in pemToFile(); pcbk was only ever used as a bogus
+     * EVP_CIPHER argument */
+    (void)pcbk;
+
     fprintf(stdout, "%s %s \n", __FUNCTION__, pPkgPath);
 
     char *baseName = fileBaseName(pPkgPath);
@@ -1620,11 +1624,32 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 	    else {
 		pkeyPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY, keyType,
 			serialNb);
-		fp = fopen(pkeyPath, "w");
+
+		if (NULL == pkeyPath) {
+		    EVP_PKEY_free(pkey);
+		    free(baseName);
+		    return CERT_PATH_LIMIT_EXCEEDED;
+		}
+
+		/* fopen's result used to go straight into PEM_write_*() */
+		if (NULL == (fp = fopen(pkeyPath, "w"))) {
+		    perror("cert_mgr");
+		    free(pkeyPath);
+		    EVP_PKEY_free(pkey);
+		    free(baseName);
+		    return CERT_FILE_ACCESS_FAILURE;
+		}
+
 		switch (keyType) {
 		    case CERT_OBJECT_RSA_PRIVATE_KEY:
+			/* the third argument is the EVP_CIPHER to encrypt with.
+			 * This used to pass the CertPassCallback cast to
+			 * const EVP_CIPHER *, which OpenSSL would then have
+			 * dereferenced as a cipher. It only ever worked because
+			 * every in-tree caller passes a NULL callback. Write the
+			 * key unencrypted, as the DER and PEM paths already do. */
 			PEM_write_RSAPrivateKey(fp, EVP_PKEY_get0_RSA(pkey),
-				(const EVP_CIPHER *)pcbk, NULL, 0, 0, pass);
+				NULL, NULL, 0, NULL, NULL);
 			certInstalled++;
 			break;
 		    case CERT_OBJECT_EC_PRIVATE_KEY:
@@ -1641,7 +1666,7 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 			if (NULL != (pfp = fopen(destPath, "a"))) {
 			    PEM_write_ECPrivateKey(pfp,
 				EVP_PKEY_get0_EC_KEY(pkey),
-				    NULL, NULL, 0, 0, NULL);
+				    NULL, NULL, 0, NULL, NULL);
 			    fclose(pfp);
 			} else {
 			    fprintf(stdout,
@@ -1666,7 +1691,7 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 
 	if (NULL != ca) {
 	    int count = 1;
-	    char *caPath = 0;
+	    char *caPath = NULL;
 	    unsigned long hash = 0;
 	    X509 *x509;
 	    FILE *fp;
@@ -1681,6 +1706,13 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 	    while ((ca != NULL) && ((x509 = sk_X509_pop(ca)) != NULL)) {
 		caPath = serialPathNameCount(baseName, CERT_DIR_CERTIFICATES,
 			CERT_OBJECT_C_AUTHORIZATION, serialNb, count++);
+
+		if (NULL == caPath) {
+		    X509_free(x509);
+		    result = CERT_PATH_LIMIT_EXCEEDED;
+		    break;
+		}
+
 		if (NULL != (fp = fopen(caPath, "w"))) {
 		    char filename[MAX_CERT_PATH];
 		    memset(filename, 0, sizeof(filename));
@@ -1703,6 +1735,10 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 		    result = CERT_FILE_ACCESS_FAILURE;
 		}
 
+		/* both of these used to be leaked on every iteration */
+		X509_free(x509);
+		free(caPath);
+		caPath = NULL;
 	    }
 
 	    if(0 < certInstalled && duplicateSerial == 0) {
@@ -1718,7 +1754,6 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 	    //				result = CertWriteDatabase(dbPath);
 	    //			}
 
-	    free(caPath);
 	    if (ca)
 		sk_X509_free(ca);
 	}
@@ -2141,7 +2176,6 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 	    if (NULL != cert) {
 		fprintf(stdout, "%s cert found \n", __FUNCTION__);
 		char *certPath;
-		FILE *fp;
 
 		if ((duplicateSerial = findSSLCertInLocalStore(cert)) != 0) {
 		    *serial = serialNb = duplicateSerial;
@@ -2176,7 +2210,7 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
 			    CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
 		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSAPrivateKey(fp, dsa, NULL, NULL, 0, 0, NULL);
+			PEM_write_DSAPrivateKey(fp, dsa, NULL, NULL, 0, NULL, NULL);
 			fclose(fp);
 		    } else {
 			fprintf(stdout, "%s unable to write DSA private key\n", __FUNCTION__);
@@ -2212,7 +2246,7 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 			    CERT_OBJECT_RSA_PRIVATE_KEY, serialNb);
 		    if (NULL != (fp = fopen(destPath, "w"))) {
 			PEM_write_RSAPrivateKey(fp, rsa, NULL,
-				NULL, 0, 0, NULL);
+				NULL, 0, NULL, NULL);
 			fclose(fp);
 		    } else {
 			fprintf(stdout, "%s unable to write RSA private key\n", __FUNCTION__);
@@ -2257,7 +2291,7 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 
 		    if (NULL != (fp = fopen(destPath, "a"))) {
 			PEM_write_ECPrivateKey(fp, ec_key,
-				NULL, NULL, 0, 0, NULL);
+				NULL, NULL, 0, NULL, NULL);
 			fclose(fp);
 		    } else {
 			fprintf(stdout,
@@ -2354,6 +2388,11 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
     int32_t serialNb = 0;
     int32_t duplicateSerial = 0;
 
+    /* pcbk is a CertPassCallback, which has a different shape from OpenSSL's
+     * pem_password_cb; the private key writers below used to pass it as the
+     * EVP_CIPHER to encrypt with. Keys are written unencrypted. */
+    (void)pcbk;
+
     /* the destination is derived per object from the configuration, so the
      * caller-supplied path is unused; it stays for prototype compatibility */
     (void)pDestPath;
@@ -2395,7 +2434,6 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 	    if (NULL != cert) {
 		fprintf(stdout, "%s cert found \n", __FUNCTION__);
 		char *certPath;
-		FILE *fp;
 
 		// see if this is a duplicate.
 		if ((duplicateSerial = findSSLCertInLocalStore(cert)) != 0) {
@@ -2449,8 +2487,8 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
 			    CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
 		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSAPrivateKey(fp, dsa, (const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
+			PEM_write_DSAPrivateKey(fp, dsa, NULL,
+				NULL, 0, NULL, pwd_ctxt);
 			fclose(fp);
 		    } else {
 			fprintf(stdout, "%s unable to write DSA private key\n", __FUNCTION__);
@@ -2485,8 +2523,8 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
 			    CERT_OBJECT_RSA_PRIVATE_KEY, serialNb);
 		    if (NULL != (fp = fopen(destPath, "w"))) {
-			int ret = PEM_write_RSAPrivateKey(fp, rsa, (const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
+			int ret = PEM_write_RSAPrivateKey(fp, rsa, NULL,
+				NULL, 0, NULL, pwd_ctxt);
 			fprintf(stdout, "%s RSA private key write return = %d\n", __FUNCTION__, ret);
 			fclose(fp);
 		    } else {
@@ -2536,8 +2574,8 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 
 		    if (NULL != (fp = fopen(destPath, "a"))) {
 			PEM_write_ECPrivateKey(fp, ec_key,
-				(const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
+				NULL,
+				NULL, 0, NULL, pwd_ctxt);
 			fclose(fp);
 		    } else {
 			fprintf(stdout,

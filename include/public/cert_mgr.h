@@ -228,7 +228,7 @@ typedef enum
  * @return CERT_OK: The database was successfully read and deciphered
  * @return CERT_CONFIG_UNAVAILABLE: The named configuration file is not
  */
-CertReturnCode_t SetupCertMgrEnviroment();
+CertReturnCode_t SetupCertMgrEnviroment(void);
 
 /*!
  * @brief Initialize the instance of the certificate Manager

@@ -476,9 +476,9 @@ char *newMem(const void *data, int32_t len)
 {
   char *nBuf;
 
-  nBuf = (void *)malloc(len + 1);
+  nBuf = (char *)malloc(len + 1);
   if (NULL == nBuf)
-    return 0;
+    return NULL;
 
   memcpy(nBuf, data, len);
   nBuf[len] = 0;

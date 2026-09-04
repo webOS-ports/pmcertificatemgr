@@ -151,8 +151,9 @@ int get_subjectaltname(X509* cert, char* buf, int buf_len){
 
       if(gen->type == GEN_IPADD) {
           if(0 < space_left) {
-              const int oline_len = 40;
-	      char oline[oline_len];
+#define IP_STRING_MAX 40
+	      char oline[IP_STRING_MAX];
+	      const int oline_len = IP_STRING_MAX;
 	      oline[0]='\0';
 	      ip_to_string(oline, oline_len, gen);
 	      space_taken= copy_csv_to_buffer(sub_str,  oline, buf_len, space_left);
