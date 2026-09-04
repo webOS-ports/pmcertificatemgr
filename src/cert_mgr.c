@@ -97,45 +97,72 @@ int Mkdir(const char *path)
 {
     struct stat statbuf;
     int rc;
-    const char *parent = dirname(strdup(path));
+    char *dup;
+    const char *parent;
 
-    if (NULL == parent) {
+    if (NULL == path) {
         return -1;
     }
-    else {
-        //do not make a directory if it exists
-        rc = stat(path,&statbuf);
-        if (rc == 0) {
-            //directory exists
-            free((void*)parent);
-            return 0;
-        }
 
-        rc = stat(parent,&statbuf);
-        if (rc == -1) {
-            if (errno == ENOENT && path != NULL) {
-                // parent is missing, make it
-                rc = Mkdir(parent);
-            }
-            else {
-                free((void*)parent);
-                return rc; // fail
+    /* dirname() may return a pointer into its argument or a pointer to
+     * static storage, so the strdup'd buffer is what has to be freed --
+     * not dirname()'s return value */
+    dup = strdup(path);
+
+    if (NULL == dup) {
+        return -1;
+    }
+
+    parent = dirname(dup);
+
+    //do not make a directory if it exists
+    rc = stat(path,&statbuf);
+    if (rc == 0) {
+        //directory exists
+        free(dup);
+        return 0;
+    }
+
+    rc = stat(parent,&statbuf);
+    if (rc == -1) {
+        if (errno == ENOENT) {
+            // parent is missing, make it
+            rc = Mkdir(parent);
+            if (rc != 0) {
+                free(dup);
+                return rc;
             }
         }
-        // actually make the dir
-        rc = mkdir(path,0777);
-        free((void*)parent);
-        return rc;
+        else {
+            free(dup);
+            return rc; // fail
+        }
     }
+    // actually make the dir
+    rc = mkdir(path,0777);
+    free(dup);
+    return rc;
 }
 
 int Touch(const char *path, const char* data)
 {
     int fd, rc;
+    char *dup;
+
+    if (NULL == path) {
+	return -1;
+    }
 
     // make sure the parent dir exists:
-    const char *parent = dirname(strdup(path));
-    rc = Mkdir(parent);
+    dup = strdup(path);
+
+    if (NULL == dup) {
+	return -1;
+    }
+
+    rc = Mkdir(dirname(dup));
+    free(dup);
+
     if (rc != 0)
 	return rc;
 
@@ -143,13 +170,19 @@ int Touch(const char *path, const char* data)
     if (fd < 0 ) {
 	return -1;
     }
-    else {
-	if (data) {
-	    write(fd,data,strlen(data));
+
+    if (data) {
+	size_t len = strlen(data);
+	ssize_t written = write(fd,data,len);
+
+	if ((written < 0) || ((size_t)written != len)) {
+	    close(fd);
+	    return -1;
 	}
-	close(fd);
-        return 0;
     }
+
+    close(fd);
+    return 0;
 }
 
 CertReturnCode_t SetupCertMgrEnviroment() {
@@ -2630,41 +2663,55 @@ CertReturnCode_t validateCertPath(const char *path, int32_t serialNb,
 	CertReturnCode_t lResult;
 	char caPath[MAX_CERT_PATH];
 	int32_t status = 0;
-	//      X509_STORE      *cert_ctx = NULL;
 
+	*pCMErr = CERT_CM_ALL_OK;
+
+	/* FIXME: CertGetDatabaseInfo() only understands CERT_DATABASE_SIZE, so
+	 * this lookup always fails and the trusted-peer exemption below never
+	 * fires. Implementing a per-item status query in cert_db.c is what is
+	 * actually needed here; until then we fall through to date checking,
+	 * which is the conservative behaviour. */
 	lResult = CertGetDatabaseInfo(CERT_DATABASE_ITEM_STATUS, &status);
-	if (status != (int32_t)statusNames[CERT_STATUS_TRUSTED_PEER]) { /* We trust the certificate per user's blessing, do not invalidate.*/
-	    /* TODO: return that the cert is valid. */
+
+	/* We trust the certificate per user's blessing, do not invalidate. */
+	if ((CERT_OK != lResult) || (status != CERT_STATUS_TRUSTED_PEER)) {
 	    lResult = checkCertDates(cert);
 
 	    if (lResult != CERT_OK) {
 		char dbPath[MAX_CERT_PATH];
-
-		*pCMErr = CERT_CM_ALL_OK;
+		const char *newStatus = NULL;
 
 		if (lResult == CERT_DATE_EXPIRED) {
 		    *pCMErr |= CERT_CM_DATE_EXPIRED;
-		    result = CertUpdateDatabaseItem(dbPath, serialNb,
-			    CERT_DATABASE_ITEM_STATUS,
-			    statusNames[CERT_STATUS_EXPIRED]);
-
+		    newStatus = statusNames[CERT_STATUS_EXPIRED];
 		} else if (lResult == CERT_DATE_PENDING) {
 		    *pCMErr |= CERT_CM_DATE_PENDING;
-		    result = CertUpdateDatabaseItem(dbPath, serialNb,
-			    CERT_DATABASE_ITEM_STATUS,
-			    statusNames[CERT_STATUS_SUSPENDED]);
+		    newStatus = statusNames[CERT_STATUS_SUSPENDED];
+		}
+
+		if (NULL != newStatus) {
+		    /* dbPath used to be passed in uninitialised */
+		    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
+			    dbPath, sizeof(dbPath));
+
+		    if (CERT_OK == result) {
+			result = CertUpdateDatabaseItem(dbPath, serialNb,
+				CERT_DATABASE_ITEM_STATUS, newStatus);
+		    }
 		}
 	    }
 	}
 
-	//      cert_ctx = X509_STORE_new();
+	if (CERT_OK == result) {
+	    if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_AUTH_CERT_DIR,
+			caPath, sizeof(caPath)) && ('\0' != caPath[0])) {
+		result = checkCert(cert, NULL, caPath);
+	    } else {
+		result = checkCert(cert, NULL, NULL);
+	    }
+	}
 
-
-	result = CertCfgGetObjectStrValue(CERTCFG_AUTH_CERT_DIR, caPath,
-		MAX_CERT_PATH);
-	result = checkCert(cert, NULL, caPath);
-
-	// X509_free(cert);
+	X509_free(cert);
     }
 
     return result;

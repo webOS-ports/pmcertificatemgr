@@ -19,8 +19,14 @@
 #ifndef __CERT_MGR_PRIV__
 #define __CERT_MGR_PRIV__
 
+/* This header used to rely on its includer having pulled in openssl and the
+ * public cert_mgr/cert_cfg headers first. Make it stand on its own. */
+#include <stdint.h>
 
+#include <openssl/x509.h>
 
+#include "cert_mgr.h"
+#include "cert_cfg.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -38,9 +44,9 @@ CertReturnCode_t removeFromPath(const int32_t,
                                 const char *prefix, const char *ext,
                                 int32_t *errorNb);
 
-CertReturnCode_t mkFileNameFromHash(char *buf, int bufSize,
+CertReturnCode_t mkFileNameFromHash(char *buf, int32_t bufSize,
                                 unsigned long hash, const char *infile,
-				unsigned int basedir);
+				certcfg_Property_t basedir);
 //CertReturnCode_t makeCertIter(cert_Iterator_t **hIter, int isSystem);
 CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t *serial);
 

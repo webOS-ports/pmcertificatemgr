@@ -346,7 +346,9 @@ int CertX509ReadTimeProperty(X509 *cert, int property, char *pBuf, int len)
 
 void CertX509Dump(X509 *cert)
 {
-#ifdef D_DEBUG_ENABLED
+#ifndef D_DEBUG_ENABLED
+  (void)cert;
+#else
   char outputStr[64];
   int rVal;
 
@@ -432,9 +434,18 @@ void CertX509Dump(X509 *cert)
 }
 
 
+/* NOTE: this does *not* currently verify the certificate. It builds an
+ * X509_STORE and populates the lookups, but the call that would actually
+ * walk the chain (check(), below) is inside "#if 0", so every certificate
+ * that reaches here is reported as good. Wiring check() back up is a
+ * behavioural change that needs to be validated against the installed
+ * certificate set before it is switched on. */
 int checkCert(X509 *cert, char *CAfile, char *CApath)
 {
   X509_STORE *cert_ctx   = NULL;
+  int rValue = 0;
+
+  (void)cert; /* unused until check() below is re-enabled */
 
   int i;
 #if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
@@ -449,12 +460,18 @@ int checkCert(X509 *cert, char *CAfile, char *CApath)
   cert_ctx = X509_STORE_new();
 
   if (cert_ctx == NULL)
-    goto end;
+    {
+      rValue = CERT_GENERAL_FAILURE;
+      goto end;
+    }
 
   lookup = X509_STORE_add_lookup(cert_ctx, X509_LOOKUP_file());
 
   if (lookup == NULL)
-    return 123456;
+    {
+      rValue = CERT_GENERAL_FAILURE;
+      goto end;
+    }
 
   if (CAfile)
     {
@@ -462,6 +479,7 @@ int checkCert(X509 *cert, char *CAfile, char *CApath)
       if (!i)
         {
           fprintf(stderr, "Error loading file %s\n", CAfile);
+          rValue = CERT_OPEN_FILE_FAILED;
           goto end;
         }
     }
@@ -473,7 +491,10 @@ int checkCert(X509 *cert, char *CAfile, char *CApath)
   lookup = X509_STORE_add_lookup(cert_ctx, X509_LOOKUP_hash_dir());
 
   if (lookup == NULL)
-    return 123456;
+    {
+      rValue = CERT_GENERAL_FAILURE;
+      goto end;
+    }
 
   if (CApath)
     {
@@ -481,6 +502,7 @@ int checkCert(X509 *cert, char *CAfile, char *CApath)
       if (!i)
         {
           fprintf(stderr, "Error loading directory %s\n", CApath);
+          rValue = CERT_OPEN_FILE_FAILED;
           goto end;
 		}
 	}
@@ -519,7 +541,7 @@ int checkCert(X509 *cert, char *CAfile, char *CApath)
 	sk_X509_pop_free(trusted, X509_free);
 #endif
 
-    return 0;
+    return rValue;
 }
 
 #if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
