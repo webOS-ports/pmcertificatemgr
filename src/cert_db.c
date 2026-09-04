@@ -287,24 +287,33 @@ CertReturnCode_t CertWriteDatabase(char *dbName)
 
   if (0 == (CertLockFile(CERT_DATABASE_LOCK)))
     {
-      char basename[MAX_CERT_PATH];
+      char baseName[MAX_CERT_PATH];
       char suffix[64];
       char *suffixp;
+      size_t dbNameLen = strlen(dbName);
+
+      suffix[0] = '\0';
+      baseName[0] = '\0';
 
       if (NULL != (suffixp = strrchr(dbName, '.')))
         {
           suffixp++;
-          strcpy(suffix, suffixp);
-
+          /* used to be an unbounded strcpy into a 64 byte buffer */
+          snprintf(suffix, sizeof(suffix), "%s", suffixp);
         }
-      if (suffixp && ((suffixp - dbName) < strlen(dbName)))
+      if (suffixp && ((size_t)(suffixp - dbName) < dbNameLen))
         {
-          strncpy(basename, dbName, (suffixp - dbName) - 1);
-          basename[(suffixp - dbName) - 1] = '\0';
+          size_t baseLen = (size_t)(suffixp - dbName) - 1;
+
+          if (baseLen >= sizeof(baseName))
+            baseLen = sizeof(baseName) - 1;
+
+          memcpy(baseName, dbName, baseLen);
+          baseName[baseLen] = '\0';
         }
       if (NULL != (db = CertLockDatabase(2)))
         {
-          save_index(basename, suffix, db);
+          save_index(baseName, suffix, db);
           CertUnlockDatabase();
         }
       else
@@ -413,23 +422,18 @@ CertReturnCode_t CertGetDatabaseStrValue(int32_t index,
             case CERT_DATABASE_ITEM_SERIAL:
             case CERT_DATABASE_ITEM_FILE:
             case CERT_DATABASE_ITEM_NAME:
-              if (len < strlen(pp[property]))
-                {
-                  result = CERT_BUFFER_LIMIT_EXCEEDED;
-                }
-              else
-                {
-                  if (!strlen(pp[property]))
-                    {
-                      propertyStr[0] = '\0';
-                    }
-                  else
-                    {
-                      strncpy(propertyStr,
-                              pp[property],
-                              strlen(pp[property]) + 1);
-                    }
-                }
+              {
+                size_t propLen = strlen(pp[property]);
+
+                if ((len <= 0) || ((size_t)len < propLen))
+                  {
+                    result = CERT_BUFFER_LIMIT_EXCEEDED;
+                  }
+                else
+                  {
+                    memcpy(propertyStr, pp[property], propLen + 1);
+                  }
+              }
               break;
 
             default:
@@ -652,6 +656,10 @@ CertReturnCode_t CertUpdateDatabaseItem(char *dbName,
 {
   CA_DB *db;
   char dbPath[MAX_CERT_PATH];
+
+  /* dbName is part of the published prototype but the database location
+   * always comes from the configuration, so it is deliberately ignored */
+  (void)dbName;
   int32_t update = 0;
   CertReturnCode_t result;
 
@@ -766,7 +774,7 @@ CertReturnCode_t CertDatabaseCountCertsDirect(char        *dbName,
   if (NULL != (db = CertLockDatabase(7)))
     {
       int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
-      for (i = 0, size = 0; i < nCertsTotal; i++)
+      for (i = 0; i < nCertsTotal; i++)
         {
           const char **pp;
 
@@ -831,7 +839,7 @@ CertReturnCode_t CertListDatabaseCertsByStatusDirect(char *dbName,
   if (NULL != (db = CertLockDatabase(7)))
     {
       int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
-      for (i = 0, size = 0; i < nCertsTotal; i++)
+      for (i = 0; i < nCertsTotal; i++)
         {
           const char **pp;
 
@@ -921,7 +929,6 @@ CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
                                                    char   *buf,
                                                    int     bufLen)
 {
-  int32_t size;
   int32_t i;
   CA_DB *db;
   CertReturnCode_t result;
@@ -933,7 +940,7 @@ CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
     {
       int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
 
-      for (i = 0, size = 0; i < nCertsTotal; i++)
+      for (i = 0; i < nCertsTotal; i++)
 		{
           int dbSerialNb;
           const char **pp;

@@ -1551,6 +1551,10 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 {
     CertReturnCode_t result = CERT_OK;
 
+    /* the destination is derived per object from the configuration, so the
+     * caller-supplied path is unused; it stays for prototype compatibility */
+    (void)pDestPath;
+
     fprintf(stdout, "%s %s \n", __FUNCTION__, pPkgPath);
 
     char *baseName = fileBaseName(pPkgPath);
@@ -1790,8 +1794,10 @@ CertReturnCode_t removeLink(unsigned long hash, const char *fullpath,
 	int32_t extCounter;
 
 
-	snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
-	pos = strlen(filename);
+	pos = snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
+
+	if ((pos < 0) || ((size_t)pos >= sizeof(filename)))
+	    return CERT_PATH_LIMIT_EXCEEDED;
 
 	result = CERT_GENERAL_FAILURE;
 	/* Look for the link to the cert */
@@ -1885,19 +1891,21 @@ CertReturnCode_t removeFromPath(const int32_t certID, const char *path,
 
     snprintf(certStr, sizeof(certStr), "%X", certID);
 
-    len = strlen(path) + 1;
+    len = strlen(path) + 1;   /* add 1 for the intervening '/' */
+    len += strlen(prefix);    /* prefix used to be left out of this sum */
     len += strlen(certStr) + 1;
     len += strlen(ext) + 2; /* don't forget the dot  */
 
     /* check to see if we have enough space */
-    // add 1 for the intervening '/'
-
     if (MAX_CERT_PATH < len) {
 	result = CERT_PATH_LIMIT_EXCEEDED;
     } else {
 	int counter = 0;
-	snprintf(fullPath, sizeof(fullPath), "%s/%s%s.%s", path, prefix,
-		certStr, ext);
+	int written = snprintf(fullPath, sizeof(fullPath), "%s/%s%s.%s", path,
+		prefix, certStr, ext);
+
+	if ((written < 0) || ((size_t)written >= sizeof(fullPath)))
+	    return CERT_PATH_LIMIT_EXCEEDED;
 
 	if(!strcmp(prefix,""))prefix="ca"; // for pfx certs(eg: E.pfx) delete files of the form caE_0.pem, caE_1.pem
 
@@ -2034,9 +2042,10 @@ CertReturnCode_t mkFileNameFromHash(char *buf, int32_t bufSize,
 	int32_t extCounter;
 	int32_t pos;
 
-	snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
+	pos = snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
 
-	pos = strlen(filename);
+	if ((pos < 0) || ((size_t)pos >= sizeof(filename)))
+	    return CERT_PATH_LIMIT_EXCEEDED;
 
 	/* Let's check to see if we've already installed this certificate */
 	for (extCounter = 0; extCounter < CERT_MAX_HASHED_FILES; ++extCounter) {
@@ -2076,7 +2085,7 @@ CertReturnCode_t mkFileNameFromHash(char *buf, int32_t bufSize,
 
 int returnFileType(const char *file) {
 	int32_t i;
-	char *extn = strrchr(file, '.');
+	const char *extn = strrchr(file, '.');
 
 	if (NULL == extn)
 		return 0;
@@ -2095,6 +2104,11 @@ int returnFileType(const char *file) {
 CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t *serial)
 {
     int32_t serialNb = 0;
+
+    /* the destination is derived per object from the configuration, so the
+     * caller-supplied path is unused; it stays for prototype compatibility */
+    (void)pDestPath;
+
     int32_t duplicateSerial = 0;
     CertReturnCode_t rValue = CERT_GENERAL_FAILURE;
     BIO *bio;
@@ -2310,6 +2324,8 @@ int pem_callback(char* buf, int32_t len, int32_t rwflag, void* cb_arg) {
 	PrvPemCallbackStruct* pcs = (PrvPemCallbackStruct*)cb_arg;
 	CertReturnCode_t result;
 
+	(void)rwflag; /* part of OpenSSL's pem_password_cb signature */
+
 	if (pcs->haveCache) {
 		fprintf(stdout, "%s have cache %s \n", __FUNCTION__, pcs->pwdCache);
 		snprintf(buf, len, "%s", pcs->pwdCache);
@@ -2337,6 +2353,11 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 {
     int32_t serialNb = 0;
     int32_t duplicateSerial = 0;
+
+    /* the destination is derived per object from the configuration, so the
+     * caller-supplied path is unused; it stays for prototype compatibility */
+    (void)pDestPath;
+
     CertReturnCode_t rValue = CERT_GENERAL_FAILURE;
     BIO *bio;
     X509 *cert;
@@ -2606,10 +2627,11 @@ CertReturnCode_t makePathToCert(int32_t serialNb, char *path, int32_t len) {
 	char serialStr[16];
 
 	snprintf(serialStr, sizeof(serialStr), "%X", serialNb);
-	if (len <= (strlen(dir) + strlen(serialStr) + 5)) {
+	if ((len <= 0) ||
+		((size_t)len <= (strlen(dir) + strlen(serialStr) + 5))) {
 	    result = CERT_BUFFER_LIMIT_EXCEEDED;
 	} else {
-	    sprintf(path, "%s/%s.pem", dir, serialStr);
+	    snprintf(path, (size_t)len, "%s/%s.pem", dir, serialStr);
 	}
     }
     return result;
@@ -2722,7 +2744,11 @@ CertReturnCode_t validateCertPath(const char *path, int32_t serialNb,
  */
 int get_key_cb(char *buf, int32_t size, int32_t rwflag, void *userdata) {
     /* userdata is a ptr to the key */
-    int32_t wantsSize = snprintf(buf, size, "%s", (const char *)userdata);
+    int32_t wantsSize;
+
+    (void)rwflag; /* part of OpenSSL's pem_password_cb signature */
+
+    wantsSize = snprintf(buf, size, "%s", (const char *)userdata);
 
     if (wantsSize >= size) {
 	wantsSize = 0;
@@ -3052,6 +3078,10 @@ int exists(const char *file) {
 int32_t existsIn(const char *file, const char *dir) {
     struct stat buf;
     int32_t err;
+
+    /* FIXME: dir is ignored -- file is expected to already be a full path.
+     * There are no in-tree callers, so nothing depends on this today. */
+    (void)dir;
 
     err = stat(file, &buf);
     return err == 0;

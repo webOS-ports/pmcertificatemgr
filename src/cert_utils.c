@@ -83,7 +83,7 @@ int getTimeString(ASN1_TIME *time_data, char *buf, int buflen)
         {
           result = CERT_NULL_BUFFER;
         }
-      else if (bufmem->length >= buflen)
+      else if ((buflen <= 0) || (bufmem->length >= (size_t)buflen))
         {
 
           result = CERT_BUFFER_LIMIT_EXCEEDED;
@@ -318,6 +318,9 @@ int CertLockFile(int fileType)
   int rValue = 0;
   int lockstate;
 
+  /* a single lock covers the whole store; see note 1 above */
+  (void)fileType;
+
   if (-1 == (lockstate = lockf(cert_LockFile_d, F_TLOCK, 0)))
     {
       rValue = errno;
@@ -344,6 +347,9 @@ int CertUnlockFile(int fileType)
 {
   int rValue = 0;
   int lockstate;
+
+  /* a single lock covers the whole store; see CertLockFile */
+  (void)fileType;
 
   if (-1 == (lockstate = lockf(cert_LockFile_d, F_ULOCK, 0)))
     {
@@ -396,9 +402,14 @@ const char *objectFileExt[] =
 /*                                                                           */
 /*****************************************************************************/
 
+/* FIXME: the switch below has no cases, so this always returns NULL. It is
+ * exported but has no callers in tree. */
 char *buildPath(int destDirType, int objectType)
 {
-  char *result = 0;
+  char *result = NULL;
+
+  (void)destDirType;
+  (void)objectType;
 
   switch (destDirType)
     {

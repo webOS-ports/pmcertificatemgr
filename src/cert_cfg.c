@@ -184,6 +184,9 @@ int CertCfgSetObjectValue(certcfg_Property_t certObjProperty, int value)
 {
   int result = CERT_GENERAL_FAILURE;
 
+  (void)certObjProperty;
+  (void)value;
+
 #ifdef D_DEBUG_ENABLED
   result =  CERT_OK;
 #endif
@@ -263,8 +266,7 @@ int CertCfgSetObjectStrValue(certcfg_Property_t certObjStrProperty,
   // check for reasonable size
   if (!value)
     {
-      if (configObject.descStr[certObjStrProperty])
-		free(configObject.descStr[certObjStrProperty]);
+      free(configObject.descStr[certObjStrProperty]);
       configObject.descStr[certObjStrProperty] =  NULL;
     }
   else
@@ -275,7 +277,18 @@ int CertCfgSetObjectStrValue(certcfg_Property_t certObjStrProperty,
         }
       else
         {
-          configObject.descStr[certObjStrProperty] = strdup(value);
+          char *dup = strdup(value);
+
+          if (NULL == dup)
+            {
+              result = CERT_GENERAL_FAILURE;
+            }
+          else
+            {
+              /* the old value used to be overwritten and leaked */
+              free(configObject.descStr[certObjStrProperty]);
+              configObject.descStr[certObjStrProperty] = dup;
+            }
         }
     }
   PRINT_CFG_STR_PROPS(certObjStrProperty, value);
@@ -382,9 +395,9 @@ static int populateConfig(void)
   for (i = CERTCFG_ROOT_DIR; i < CERTCFG_MAX_PROPERTY ; i++)
     {
       char *str;
-      /* zero all pointers so if there's no conf we dont' have
-      ** bogus info */
-      configObject.descStr[i] = '\0';
+      /* release any previous value so if there's no conf we don't have
+      ** bogus info. Assigning '\0' here just dropped the old pointer. */
+      CertCfgSetObjectStrValue(i, NULL);
 
       str = NCONF_get_string(configObject.conf,
 			     configObject.descStr[CERTCFG_CONFIG_NAME],
