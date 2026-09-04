@@ -301,10 +301,18 @@ int CertInitLockFiles(char *rootPath)
 {
   int result;
   int fd;
-  char lockfile[64];
+  char lockfile[MAX_CERT_PATH];
+  int len;
+
+  if (NULL == rootPath)
+    return CERT_UNDEFINED_ROOT_DIR;
 
   /* we may need finer grain than one, but for now */
-  snprintf(lockfile, sizeof(lockfile),"%s/.lock", rootPath);
+  len = snprintf(lockfile, sizeof(lockfile),"%s/.lock", rootPath);
+
+  /* was char[64]; a longer root silently produced a truncated lock path */
+  if ((len < 0) || ((size_t)len >= sizeof(lockfile)))
+    return CERT_PATH_LIMIT_EXCEEDED;
 
   if (-1 == (fd = open(lockfile, O_CREAT | O_WRONLY | O_TRUNC, 0700)))
     {

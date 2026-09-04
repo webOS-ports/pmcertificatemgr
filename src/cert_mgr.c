@@ -200,44 +200,56 @@ CertReturnCode_t SetupCertMgrEnviroment(void) {
 //	} else {
 //		ifp = fopen(dbName, mode);
 //		if (ifp == NULL) {
-			char certPath[64];
-			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_CERT_DIR, certPath, 64)))
-					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read cert path");
-				strcpy(certPath, "/var/ssl/certs");
+			/* Every directory the configuration names has to exist
+			 * before anything is installed. This used to create only
+			 * the certificate and private key directories, so
+			 * CertAddTrustedCert() and the trusted-CA link that
+			 * CertAddAuthorizedCert() makes both failed with ENOENT
+			 * on a fresh device -- silently, since neither checks.
+			 *
+			 * The buffers here were char[64] asked to hold up to
+			 * MAX_CERT_PATH, so a configured path over 63 characters
+			 * failed to read and silently fell back to a hardcoded
+			 * /var/ssl, provisioning a store nothing had named. */
+			static const certcfg_Property_t dirProps[] = {
+				CERTCFG_CERT_DIR,
+				CERTCFG_PRIVATE_KEY_DIR,
+				CERTCFG_PUBLIC_KEY_DIR,
+				CERTCFG_CRL_DIR,
+				CERTCFG_PACKAGE_DIR,
+				CERTCFG_AUTH_CERT_DIR,
+				CERTCFG_TRUSTED_CA_DIR
+			};
+			char certPath[MAX_CERT_PATH];
+			size_t n;
+
+			for (n = 0; n < sizeof(dirProps) / sizeof(dirProps[0]); n++) {
+				/* not every property has to be configured */
+				if ((CERT_OK != CertCfgGetObjectStrValue(dirProps[n],
+						certPath, sizeof(certPath)))
+						|| (!strlen(certPath))) {
+					continue;
+				}
+
+				if (Mkdir(certPath) != 0) {
+					fprintf(stderr, "ERROR making dir '%s'\n", certPath);
+				}
 			}
 
-			if (Mkdir(certPath) != 0) {
-				fprintf(stderr, "ERROR making dir '%s'\n", certPath);
-			}
-
-			if ( Touch(dbName,NULL) != 0) {
+			if (Touch(dbName, NULL) != 0) {
 				fprintf(stderr, "ERROR touching '%s'\n", dbName);
 			}
 
 			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_CERT_SERIAL_NAME, certPath, 64)))
+					CERTCFG_CERT_SERIAL_NAME, certPath, sizeof(certPath))))
 					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read cert path");
-				strcpy(certPath, "/var/ssl/serial");
+				fprintf(stderr, "%s: no serial file configured\n",
+					__FUNCTION__);
+				return CERT_UNDEFINED_DESTINATION;
 			}
 
-			//sprintf(command, "echo \'01\' > %s", certPath);
-			//fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (Touch(certPath,"01\n")) {
+			if (Touch(certPath, "01\n")) {
 				fprintf(stderr, "ERROR writing '%s'\n", certPath);
-			}
-
-			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_PRIVATE_KEY_DIR, certPath, 64)))
-					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read private key path");
-				strcpy(certPath, "/var/ssl/private");
-			}
-
-			if (Mkdir(certPath) != 0) {
-				fprintf(stderr, "ERROR creating dir '%s'\n", certPath);
 			}
 
 			result = CERT_OK;
@@ -314,10 +326,14 @@ CertReturnCode_t CertInitCertMgr(const char *configFile)
 	}
 
 	if (CERT_OK == result) {
-	    char rootPath[64];
+	    /* was char[64]; a longer configured root silently became "."
+	     * and dropped the lock file into the current directory */
+	    char rootPath[MAX_CERT_PATH];
 	    if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-		CERTCFG_ROOT_DIR, rootPath, 64))) || (!strlen(rootPath))) {
-		g_strlcpy(rootPath, ".", sizeof(rootPath));
+		CERTCFG_ROOT_DIR, rootPath, sizeof(rootPath)))) || (!strlen(rootPath))) {
+		fprintf(stderr, "%s: no root directory configured\n", __FUNCTION__);
+		sInited = 0;
+		return CERT_UNDEFINED_ROOT_DIR;
 	    }
 	    if (CERT_OK != (result = CertInitLockFiles(rootPath))) {
 		perror("CertInitCertMgr");
