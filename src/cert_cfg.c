@@ -314,21 +314,30 @@ int CertCfgGetObjectStrValue(certcfg_Property_t certObjStrProperty, char *buf, i
 
       rValue = CERT_UNKNOWN_PROPERTY;
     }
-  else {
-      if (configObject.descStr[certObjStrProperty])  {
-	  if (bufLen <= (sLen = strlen(configObject.descStr[certObjStrProperty])))
-	  {
-	      PRINT_ERROR2("Insufficient buffor for the string property", sLen);
-	      rValue = CERT_INSUFFICIENT_BUFFER_SPACE;
-	  }
-	  else
-	  {
-	      strncpy(buf, configObject.descStr[certObjStrProperty], sLen);
-	      buf[sLen] = '\0';
-	      PRINT_CFG_STR_PROPS(certObjStrProperty, buf);
-	  }
-      }
-  }
+  else if (NULL == buf || bufLen <= 0)
+    {
+      rValue = CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
+  else if (NULL == configObject.descStr[certObjStrProperty])
+    {
+      /* Reporting CERT_OK here while leaving buf untouched left every
+       * caller reading an uninitialised buffer */
+      buf[0] = '\0';
+      rValue = CERT_PROPERTY_NOT_FOUND;
+    }
+  else
+    {
+      if (bufLen <= (sLen = strlen(configObject.descStr[certObjStrProperty])))
+        {
+          PRINT_ERROR2("Insufficient buffer for the string property", sLen);
+          rValue = CERT_INSUFFICIENT_BUFFER_SPACE;
+        }
+      else
+        {
+          memcpy(buf, configObject.descStr[certObjStrProperty], sLen + 1);
+          PRINT_CFG_STR_PROPS(certObjStrProperty, buf);
+        }
+    }
 
   return rValue;
 }

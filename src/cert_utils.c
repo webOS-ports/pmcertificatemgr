@@ -435,14 +435,25 @@ char *serialPathName(char *baseName, int destDirType, CertObject_t objectType,
 char *serialPathNameCount(char *baseName, int destDirType,
 	CertObject_t objectType, int serial, int count)
 {
-	char fullPath[64];
-	char dir[64];
+	char fullPath[MAX_CERT_PATH];
+	char dir[MAX_CERT_PATH];
 	char serialStr[64];
 	char *rDest = NULL;
 	int rValue;
+	int needed;
 	int cfgTag = CERTCFG_MAX_PROPERTY;
 
-	/* Do this so that we can calculate the entire length */
+	/* getPrivKeyType() hands back CERT_OBJECT_MAX_OBJECT when it cannot
+	 * identify the key, and that value would index one past the end of
+	 * both objectFileName[] and objectFileExt[] */
+	if ((objectType < 0) || (objectType >= CERT_OBJECT_MAX_OBJECT)) {
+		return NULL;
+	}
+
+	/* baseName has never been part of the generated name; it is kept only
+	 * because it is part of the published prototype */
+	(void)baseName;
+
 	snprintf(serialStr, sizeof(serialStr),"%X", serial);
 	switch (destDirType) {
 	case CERT_DIR_PRIVATE_KEY:
@@ -473,20 +484,19 @@ char *serialPathNameCount(char *baseName, int destDirType,
 	}
 
 	if (CERT_OK == (rValue = CertCfgGetObjectStrValue(cfgTag, dir,
-			MAX_CERT_PATH))) {
-		if (MAX_CERT_PATH >= (strlen(baseName) + 1 +
-				strlen(dir) + 1	+
-				strlen(objectFileName[objectType]) + 1 +
-				strlen(serialStr) + 1 +
-				strlen(objectFileExt[objectType]) + 1)) {
+			sizeof(dir)))) {
+		if (count == 0) {
+			needed = snprintf(fullPath, sizeof(fullPath), "%s/%s%s.%s",
+				dir, objectFileName[objectType],
+				serialStr, objectFileExt[objectType]);
+		} else {
+			needed = snprintf(fullPath, sizeof(fullPath), "%s/%s%s_%d.%s",
+				dir, objectFileName[objectType],
+				serialStr, count - 1, objectFileExt[objectType]);
+		}
 
-			if(count == 0) {
-				sprintf(fullPath, "%s/%s%s.%s", dir, objectFileName[objectType],
-					serialStr, objectFileExt[objectType]);
-			} else {
-				sprintf(fullPath, "%s/%s%s_%d.%s", dir, objectFileName[objectType],
-								serialStr, count-1, objectFileExt[objectType]);
-			}
+		/* only hand back a path that was not truncated */
+		if ((needed > 0) && ((size_t)needed < sizeof(fullPath))) {
 
 			/* Let's check to see if we've already installed this certificate */
 //			if(CERT_OBJECT_C_AUTHORIZATION == objectType) {
@@ -502,10 +512,7 @@ char *serialPathNameCount(char *baseName, int destDirType,
 //				}
 //			}
 
-			rDest = (char *)malloc(strlen(fullPath) + 1);
-
-			// only do copy if path was short enough:
-			strcpy(rDest, fullPath);
+			rDest = strdup(fullPath);
 		}
 	}
 	return rDest;
@@ -526,20 +533,25 @@ char *serialPathNameCount(char *baseName, int destDirType,
 
 char *fileBaseName(const char *pPath)
 {
-	char * name;
+  char *name;
   char *basePtr;
-  char *base = (char *)malloc(strlen(pPath) + 1);
+  char *base;
 
-  strcpy(base, pPath);
+  if (NULL == pPath)
+    return NULL;
 
-  if (0 != (basePtr = strrchr((const char *)base, '.')))
-    basePtr[0] = 0;
+  base = strdup(pPath);
+
+  if (NULL == base)
+    return NULL;
+
+  if (NULL != (basePtr = strrchr(base, '.')))
+    basePtr[0] = '\0';
 
   name = basename(base);
-  strcpy(base, name);
+  memmove(base, name, strlen(name) + 1);
 
   return base;
-
 }
 
 
