@@ -133,8 +133,12 @@ int main(int argc, char **argv)
       printf("%08d> ", cmdNum++);
       
       memset((void *)cmdBuf, 0, MAX_CERT_PATH);
-      
-      gets(cmdBuf);
+
+      /* gets() was removed in C11 and cannot be used safely in any case */
+      if (NULL == fgets(cmdBuf, MAX_CERT_PATH, stdin))
+        break;
+
+      cmdBuf[strcspn(cmdBuf, "\n")] = '\0';
       cmd[0] = 0;
       nOpts = sscanf(cmdBuf, "%s %s %s %s", cmd, param1, param2, param3);
       
