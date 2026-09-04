@@ -298,7 +298,7 @@ CertReturnCode_t CertInitCertMgr(const char *configFile)
 {
     static int32_t sInited = 0;
     int32_t result = CERT_OK;
-    char *configName = 0; //= (char *)configFile;
+    char *configName = NULL; //= (char *)configFile;
 
     if (!sInited) {
 	sInited = 1;
@@ -2390,7 +2390,6 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 		    fprintf(stdout, "%s crl read 0x%lX\n", __FUNCTION__, X509_NAME_hash(X509_CRL_get_issuer(crl)));
 
 		    char *certPath;
-		    FILE *fp;
 
 		    certPath = serialPathName(baseName, CERT_DIR_CRL,
 			    CERT_OBJECT_CRL, serialNb);
@@ -2670,7 +2669,6 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    fprintf(stdout, "%s crl read 0x%lX\n", __FUNCTION__, X509_NAME_hash(X509_CRL_get_issuer(crl)));
 
 		    char *certPath;
-		    FILE *fp;
 
 		    certPath = serialPathName(baseName, CERT_DIR_CRL,
 			    CERT_OBJECT_CRL, serialNb);
@@ -3089,9 +3087,9 @@ void makeUnique(char *path) {
 
 #endif
 
-#if D_DEBUG_ENABLED
+#ifdef D_DEBUG_ENABLED
     static void
-logSSLErrors()
+logSSLErrors(void)
 {
     // we'll get this error if bad passwd: PEM_F_PEM_DO_HEADER ???
     for (;; )
