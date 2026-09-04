@@ -2843,7 +2843,13 @@ CertReturnCode_t validateCertPath(const char *path, int32_t serialNb,
 			caPath, sizeof(caPath)) && ('\0' != caPath[0])) {
 		result = checkCert(cert, NULL, caPath);
 	    } else {
-		result = checkCert(cert, NULL, NULL);
+		/* Without an authorized directory there is nothing to anchor
+		 * against. Passing NULL here would hand the decision to OpenSSL's
+		 * system-wide store, so a misconfigured store would report every
+		 * public CA as trusted rather than reporting the misconfiguration. */
+		fprintf(stderr, "%s: %s is not configured; cannot establish trust\n",
+			__FUNCTION__, "authorized");
+		result = CERT_UNDEFINED_DESTINATION;
 	    }
 	}
 

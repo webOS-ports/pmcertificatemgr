@@ -365,28 +365,84 @@ int main(int argc, char **argv)
         }
     }
 
-    /* ---------------- authorize, validate, remove ---------------- */
+    /* ---------------- authorize, validate, remove ----------------
+     * checkCert() really does call X509_verify_cert() now, so validation is
+     * assertable: an authorized certificate inside its validity window must
+     * verify, and one outside it must not. Expectations come from OpenSSL's
+     * view of the same certificate so this holds for any corpus. */
     {
-        int authorized = 0, validated = 0, removed = 0;
+        int authorized = 0, removed = 0;
+        int agreeValid = 0, expectValid = 0, inWindow;
 
         for (i = 0; i < nInstalled; i++) {
             if (CERT_OK == CertAddAuthorizedCert(serials[i])) {
                 authorized++;
             }
-            if (CERT_OK == CertValidateCertificate(serials[i])) {
-                validated++;
-            }
         }
-        printf("  authorized %d/%d, validated %d/%d\n",
-               authorized, nInstalled, validated, nInstalled);
+        printf("  authorized %d/%d\n", authorized, nInstalled);
         CHECK(authorized == nInstalled, "authorized every certificate (%d/%d)",
               authorized, nInstalled);
 
-        /* NOTE: validated == nInstalled proves nothing about trust today.
-         * checkCert() in cert_x509.c never calls X509_verify_cert() -- the
-         * chain walk is still inside "#if 0" -- so every certificate that
-         * parses is reported valid. When that is wired up this check should
-         * become a real assertion about which certificates verify. */
+        for (i = 0; i < nInstalled; i++) {
+            char  path[MAX_CERT_PATH];
+            X509 *x = NULL;
+            int   valid;
+
+            if (CERT_OK != makePathToCert(serials[i], path, sizeof(path))) {
+                continue;
+            }
+            if ((CERT_OK != CertPemToX509(path, &x)) || (NULL == x)) {
+                continue;
+            }
+
+            /* notBefore <= now <= notAfter, per OpenSSL */
+            inWindow = (0 >= X509_cmp_current_time(X509_get_notBefore(x))) &&
+                       (0 <  X509_cmp_current_time(X509_get_notAfter(x)));
+            X509_free(x);
+
+            if (inWindow) {
+                expectValid++;
+            }
+
+            valid = (CERT_OK == CertValidateCertificate(serials[i]));
+
+            if (valid == inWindow) {
+                agreeValid++;
+            } else {
+                printf("  validation mismatch on serial %d: in window %d, valid %d\n",
+                       serials[i], inWindow, valid);
+            }
+        }
+
+        printf("  validated: %d of %d are inside their validity window\n",
+               expectValid, nInstalled);
+        CHECK(agreeValid == nInstalled,
+              "validation agrees with the validity window on every certificate (%d/%d)",
+              agreeValid, nInstalled);
+        if (expectValid == nInstalled) {
+            printf("  note: every certificate in this corpus is currently valid;\n"
+                   "        use gen_test_certs.sh for expired/not-yet-valid cases\n");
+        }
+
+        /* A certificate that was installed but never authorized has no trust
+         * anchor and must be rejected. Before X509_verify_cert() was wired up
+         * this returned CERT_OK just like everything else. */
+        {
+            int32_t unauth = 0;
+            char    path[MAX_CERT_PATH];
+
+            snprintf(path, sizeof(path), "%s/%s", bundle, names[0]);
+            CertRemoveCertificate(serials[0]);
+
+            if (CERT_OK == CertInstallKeyPackage(path, NULL, NULL, &unauth)) {
+                r = CertValidateCertificate(unauth);
+                CHECK(CERT_OK != r,
+                      "an unauthorized certificate is rejected (got %d)", r);
+                CertRemoveCertificate(unauth);
+            }
+            serials[0] = serials[nInstalled - 1];
+            nInstalled--;
+        }
 
         for (i = 0; i < nInstalled; i++) {
             if (CERT_OK == CertRemoveCertificate(serials[i])) {
