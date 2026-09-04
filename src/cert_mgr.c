@@ -826,22 +826,61 @@ CertReturnCode_t CertRemoveCertificateDirect(int32_t serialNb,
 
 CertReturnCode_t removeLinkFiles(void) {
 	CertReturnCode_t result = 0;
-	char certPath[64] = {'\0'};
-	gchar* command = NULL;
+	char certPath[MAX_CERT_PATH] = {'\0'};
+	DIR *dir;
+	struct dirent *entry;
 
 	if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-			CERTCFG_CERT_DIR, certPath, 64)))
+			CERTCFG_CERT_DIR, certPath, sizeof(certPath))))
 			|| (!strlen(certPath))) {
 		perror("CertInitCertMgr unable to read cert path");
-		strcpy(certPath, "/var/ssl/certs");
+		snprintf(certPath, sizeof(certPath), "%s", "/var/ssl/certs");
 	}
 
-	command = g_strdup_printf( "rm -f `for f in $(find %s -type l); do if [ ! -e \"$f\" ]; then echo $f; fi; done`",certPath);
-	fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-	if (-1 == system(command)) {
-		fprintf(stderr, "ERROR removing links\n");
+	/* This used to shell out to
+	 *   rm -f `for f in $(find <dir> -type l); do ... done`
+	 * via system(3), which forks /bin/sh, breaks on any path containing
+	 * whitespace or a shell metacharacter, and cannot report which entry
+	 * failed. Walk the directory and unlink dangling symlinks directly. */
+	if (NULL == (dir = opendir(certPath))) {
+		fprintf(stderr, "ERROR %d opening '%s'\n", errno, certPath);
+		return result;
 	}
-	g_free(command);
+
+	while (NULL != (entry = readdir(dir))) {
+		char linkPath[MAX_CERT_PATH];
+		struct stat sb;
+		int len;
+
+		if ((0 == strcmp(entry->d_name, ".")) ||
+			(0 == strcmp(entry->d_name, ".."))) {
+			continue;
+		}
+
+		len = snprintf(linkPath, sizeof(linkPath), "%s/%s", certPath,
+			entry->d_name);
+
+		if ((len < 0) || ((size_t)len >= sizeof(linkPath))) {
+			continue;
+		}
+
+		/* lstat tells us it is a symlink; stat failing tells us the
+		 * target is gone */
+		if ((0 != lstat(linkPath, &sb)) || !S_ISLNK(sb.st_mode)) {
+			continue;
+		}
+
+		if (0 == stat(linkPath, &sb)) {
+			continue;
+		}
+
+		if (0 != unlink(linkPath)) {
+			fprintf(stderr, "ERROR %d removing dangling link '%s'\n",
+				errno, linkPath);
+		}
+	}
+
+	closedir(dir);
 	// XXX also remove links from cache dir
 
 	return result;
@@ -1513,6 +1552,43 @@ static CertReturnCode_t getNextSerialNumber(int32_t *serial) {
 	CertUnlockFile(CERT_FILELOCK_DATABASE);
 
 	return rValue;
+}
+
+/*--***********************************************************************--*/
+/*                                                                           */
+/* FUNCTION: gzipFile                                                        */
+/*       Compress a file in place with gzip(1)                               */
+/* NOTES:                                                                    */
+/*       1) This used to be system("gzip <path>"), which runs the path       */
+/*          through /bin/sh. g_spawn_sync execs gzip directly, so the path   */
+/*          is never parsed as a shell word.                                 */
+/*                                                                           */
+/*--***********************************************************************--*/
+
+static void gzipFile(const char *path)
+{
+    gchar *argv[] = { (gchar *)"gzip", (gchar *)path, NULL };
+    gint status = 0;
+    GError *error = NULL;
+
+    if (NULL == path) {
+	return;
+    }
+
+    if (!g_spawn_sync(NULL, argv, NULL,
+		G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL,
+		NULL, NULL, NULL, NULL, &status, &error)) {
+	fprintf(stderr, "ERROR compressing cert file '%s': %s\n", path,
+		(NULL != error) ? error->message : "unknown");
+	g_clear_error(&error);
+	return;
+    }
+
+    if (!g_spawn_check_wait_status(status, &error)) {
+	fprintf(stderr, "ERROR compressing cert file '%s': %s\n", path,
+		(NULL != error) ? error->message : "unknown");
+	g_clear_error(&error);
+    }
 }
 
 /*--***********************************************************************--*/
@@ -2321,12 +2397,7 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 		    if (NULL != (fp = fopen(certPath, "w"))) {
 			PEM_write_X509_CRL(fp, crl);
 			fclose(fp);
-			char command[255] = {'\0'};
-			snprintf(command, sizeof(command), "gzip %s", certPath);
-			fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (-1 == system(command)) {
-			    fprintf(stderr, "ERROR compressing cert file '%s'\n", certPath);
-			}
+			gzipFile(certPath);
 		    }
 		    free(certPath);
 		    X509_CRL_free(crl);
@@ -2609,12 +2680,7 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    if (NULL != (fp = fopen(certPath, "w"))) {
 			PEM_write_X509_CRL(fp, crl);
 			fclose(fp);
-			char command[255] = {'\0'};
-			snprintf(command, sizeof(command), "gzip %s", certPath);
-			fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (-1 == system(command)) {
-			    fprintf(stderr, "ERROR compressing cert file '%s'\n", certPath);
-			}
+			gzipFile(certPath);
 		    } else {
 			fprintf(stdout, "%s failed writing file.\n", __FUNCTION__);
 		    }
