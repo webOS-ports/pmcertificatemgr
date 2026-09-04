@@ -184,6 +184,12 @@ CertReturnCode_t CertInitDatabase(char *dbName)
         }
       else
         {
+          /* every entry point re-reads the database; without this the
+           * previous copy was simply dropped on the floor */
+          if ((NULL != clocaldb) && (clocaldb != db))
+            {
+              free_index(clocaldb);
+            }
           clocaldb = db;
         }
       CertUnlockFile(CERT_DATABASE_LOCK);
@@ -243,6 +249,12 @@ CertReturnCode_t CertReadDatabase(char *dbName)
         }
       else
         {
+          /* every entry point re-reads the database; without this the
+           * previous copy was simply dropped on the floor */
+          if ((NULL != clocaldb) && (clocaldb != db))
+            {
+              free_index(clocaldb);
+            }
           clocaldb = db;
         }
       CertUnlockFile(CERT_DATABASE_LOCK);
@@ -1370,7 +1382,7 @@ int parse_yesno(const char *str, int def)
 		case 'y': /* yes */
 		case 'Y': /* YES */
 		case '1': /* 1 */
-			ret = 0;
+			ret = 1;
 			break;
 		default:
 			ret = def;

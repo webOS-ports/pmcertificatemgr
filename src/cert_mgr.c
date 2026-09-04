@@ -2405,6 +2405,12 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 		    fprintf(stdout, "%s no crl \n", __FUNCTION__);
 		}
 	    }
+	    /* the certificate read at the top of this function was never
+	     * released, so every installed certificate leaked one X509 */
+	    if (NULL != cert) {
+		X509_free(cert);
+	    }
+
 	    free(baseName);
 	    fclose(fpIn);
 	} else {
@@ -2690,6 +2696,12 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    fprintf(stdout, "%s no crl \n", __FUNCTION__);
 		}
 	    }
+	    /* the certificate read at the top of this function was never
+	     * released, so every installed certificate leaked one X509 */
+	    if (NULL != cert) {
+		X509_free(cert);
+	    }
+
 	    free(baseName);
 	    fclose(fpIn);
 	} else {
@@ -3247,14 +3259,24 @@ int findSSLCertInLocalStore(X509 * cert)
 		result = makePathToCert(serial, dir, MAX_CERT_PATH);
 		if (CERT_OK == result) {
 		    X509 *candidate_cert = NULL;
+		    int match = 0;
+
 		    result = CertPemToX509(dir, &candidate_cert);
 		    if (candidate_cert == NULL)
 			continue;
+
 		    if (result == CERT_OK) {
 			//DO COMPARISON
-			if (X509_cmp(candidate_cert,cert) == 0) {
-			    return serial;
-			}
+			match = (X509_cmp(candidate_cert, cert) == 0);
+		    }
+
+		    /* this used to fall out of the loop -- and return early on a
+		     * match -- without ever releasing the candidate, leaking one
+		     * X509 per database entry scanned, on every install */
+		    X509_free(candidate_cert);
+
+		    if (match) {
+			return serial;
 		    }
 		}
 	    }

@@ -59,6 +59,7 @@ int CertX509ReadStrProperty(X509 *cert, int property, char *pBuf, int len)
 {
   int result = CERT_OK;
   int dataIdx = 0;
+  int truncated = 0;
   X509_NAME *cName;
   //  ASN1_STRING *data;
   int lproperty;
@@ -69,8 +70,23 @@ int CertX509ReadStrProperty(X509 *cert, int property, char *pBuf, int len)
       return result;
     }
 
+  if ((NULL == pBuf) || (0 >= len))
+    {
+      return CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
+
+  /* copy_csv_to_buffer() appends with g_strlcat(), which starts by taking
+   * strlen() of the destination. pBuf comes straight from the caller and was
+   * never initialised here, so that read ran off the end of short buffers. */
+  pBuf[0] = '\0';
+
   lproperty=  make_property_ssl_equiv(property);
   cName= get_cname(property,cert);
+
+  if (NULL == cName)
+    {
+      return CERT_PROPERTY_NOT_FOUND;
+    }
 
   if(lproperty==NID_subject_alt_name){  // if 1
 
@@ -104,23 +120,38 @@ int CertX509ReadStrProperty(X509 *cert, int property, char *pBuf, int len)
 			ASN1_IA5STRING *data;
 			data = X509_NAME_ENTRY_get_data(e);
 			syslog(LOG_INFO,"all common name: %s", (char *) data->data);
-			if(0 < space_left)
-				space_taken= copy_csv_to_buffer(sub_str, (char *)data->data, len, space_left);
+			if (0 < space_left) {
+				space_taken = copy_csv_to_buffer(sub_str, (char *)data->data, len, space_left);
+
+				/* 0 means the value did not fit and was truncated */
+				if (0 == space_taken)
+					truncated = 1;
+			} else {
+				truncated = 1;
+			}
 			space_left= space_left - space_taken;
 		}
 
  }
   if (0 >  dataIdx) {
     return CERT_PROPERTY_NOT_FOUND;
-  } else {
+  }
+
+  if (truncated) {
+    return CERT_BUFFER_LIMIT_EXCEEDED;
+  }
+
+  {
 	  // trim trailing ','
-	  int pBufLen = strlen(pBuf);
-	  if (pBuf[pBufLen-1] == ',')
+	  size_t pBufLen = strlen(pBuf);
+
+	  /* pBufLen is 0 whenever the entry held an empty string; pBuf[-1] is
+	   * not ours to touch */
+	  if ((0 < pBufLen) && (pBuf[pBufLen-1] == ','))
 		pBuf[pBufLen-1] = '\0';
+
 	  return CERT_OK;
   }
-//
-  return CERT_PROPERTY_STRING_NOT_FOUND;
 }
 
 int get_subjectaltname(X509* cert, char* buf, int buf_len){
