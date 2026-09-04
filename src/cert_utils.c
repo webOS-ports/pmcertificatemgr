@@ -83,7 +83,7 @@ int getTimeString(ASN1_TIME *time_data, char *buf, int buflen)
         {
           result = CERT_NULL_BUFFER;
         }
-      else if (bufmem->length >= buflen)
+      else if ((buflen <= 0) || (bufmem->length >= (size_t)buflen))
         {
 
           result = CERT_BUFFER_LIMIT_EXCEEDED;
@@ -163,23 +163,28 @@ int CertGetSerialNumber(char *path)
 {
   int fd;
   char inBuf[MAX_CERT_PATH];
-  int rValue;
+  ssize_t nRead;
+  unsigned int serial;
 
   if (0 > (fd = open(path, O_RDONLY)))
     return CERT_FILE_ACCESS_FAILURE;
 
-  rValue = read(fd, inBuf, MAX_CERT_PATH);
-  if(-1 != rValue) {
-    inBuf[rValue] = '\0';
+  /* leave room for the terminator; the old code read MAX_CERT_PATH bytes
+   * and then wrote inBuf[MAX_CERT_PATH], one past the end */
+  nRead = read(fd, inBuf, sizeof(inBuf) - 1);
+  close(fd);
 
-    sscanf(inBuf, "%x", &rValue);
-    close(fd);
-    return rValue;
-  }
-  else {
-    close(fd);
+  if (0 > nRead)
     return CERT_FILE_READ_FAILURE;
-  }
+
+  inBuf[nRead] = '\0';
+
+  /* an unparsable file used to leave the byte count in place and hand it
+   * back as if it were the serial number */
+  if (1 != sscanf(inBuf, "%x", &serial))
+    return CERT_FILE_READ_FAILURE;
+
+  return (int)serial;
 }
 
 /*****************************************************************************/
@@ -211,42 +216,63 @@ int CertGetSerialNumberInc(char *path, int increment)
 {
   int fd;
   char inBuf[MAX_CERT_PATH];
-  int rValue, serial = 0;
+  ssize_t nRead;
+  unsigned int serial = 0;
 
   fd = open(path, O_RDWR);
 
   if (fd < 0 )
     {
-    return 0;
+      return 0;
     }
-  else
+
+  /* leave room for the terminator; inBuf was previously handed to sscanf
+   * without ever being terminated */
+  nRead = read(fd, inBuf, sizeof(inBuf) - 1);
+
+  if (0 > nRead)
     {
-      rValue = read(fd, inBuf, sizeof(inBuf));
-      if (rValue < 0)
+      fprintf(stderr, "Error %d reading certificate serial number\n", errno);
+      close(fd);   /* used to leak the descriptor here */
+      return 0;
+    }
+
+  inBuf[nRead] = '\0';
+
+  if (1 != sscanf(inBuf, "%x", &serial))
+    serial = 0;
+
+  if (serial)
+    {
+      int len;
+
+      printf("Serial is currently %u\n", serial);
+      lseek(fd, 0, SEEK_SET);
+      len = snprintf(inBuf, sizeof(inBuf), "%X ", serial + increment);
+
+      if ((len < 0) || ((size_t)len >= sizeof(inBuf)))
         {
-          fprintf(stderr, "Error %d reading certificate serial number\n", errno);
+          fprintf(stderr, "Serial number too long for %s\n", path);
+          close(fd);
           return 0;
         }
-      sscanf(inBuf, "%x", &serial);
 
-      if (serial)
+      if (ftruncate(fd, 0))
         {
-          printf("Serial is currently %d\n", serial);
-          lseek(fd, 0, SEEK_SET);
-          snprintf(inBuf, sizeof(inBuf), "%X ", serial + increment);
-          if (ftruncate(fd, 0))
-            {
-              fprintf(stderr, "Error %d truncating %s\n", errno, path);
-            }
-          if (4 != write(fd, inBuf, 4))
-            {
-              fprintf(stderr, "Error %d writing to %s\n", errno, path);
-            }
+          fprintf(stderr, "Error %d truncating %s\n", errno, path);
         }
-      close(fd);
 
-      return serial;
+      /* this used to write exactly 4 bytes whatever the serial's width,
+       * corrupting the file for serials outside 3 hex digits */
+      if (len != write(fd, inBuf, len))
+        {
+          fprintf(stderr, "Error %d writing to %s\n", errno, path);
+        }
     }
+
+  close(fd);
+
+  return (int)serial;
 }
 
 
@@ -275,10 +301,18 @@ int CertInitLockFiles(char *rootPath)
 {
   int result;
   int fd;
-  char lockfile[64];
+  char lockfile[MAX_CERT_PATH];
+  int len;
+
+  if (NULL == rootPath)
+    return CERT_UNDEFINED_ROOT_DIR;
 
   /* we may need finer grain than one, but for now */
-  snprintf(lockfile, sizeof(lockfile),"%s/.lock", rootPath);
+  len = snprintf(lockfile, sizeof(lockfile),"%s/.lock", rootPath);
+
+  /* was char[64]; a longer root silently produced a truncated lock path */
+  if ((len < 0) || ((size_t)len >= sizeof(lockfile)))
+    return CERT_PATH_LIMIT_EXCEEDED;
 
   if (-1 == (fd = open(lockfile, O_CREAT | O_WRONLY | O_TRUNC, 0700)))
     {
@@ -318,6 +352,9 @@ int CertLockFile(int fileType)
   int rValue = 0;
   int lockstate;
 
+  /* a single lock covers the whole store; see note 1 above */
+  (void)fileType;
+
   if (-1 == (lockstate = lockf(cert_LockFile_d, F_TLOCK, 0)))
     {
       rValue = errno;
@@ -344,6 +381,9 @@ int CertUnlockFile(int fileType)
 {
   int rValue = 0;
   int lockstate;
+
+  /* a single lock covers the whole store; see CertLockFile */
+  (void)fileType;
 
   if (-1 == (lockstate = lockf(cert_LockFile_d, F_ULOCK, 0)))
     {
@@ -396,9 +436,14 @@ const char *objectFileExt[] =
 /*                                                                           */
 /*****************************************************************************/
 
+/* FIXME: the switch below has no cases, so this always returns NULL. It is
+ * exported but has no callers in tree. */
 char *buildPath(int destDirType, int objectType)
 {
-  char *result = 0;
+  char *result = NULL;
+
+  (void)destDirType;
+  (void)objectType;
 
   switch (destDirType)
     {
@@ -435,14 +480,25 @@ char *serialPathName(char *baseName, int destDirType, CertObject_t objectType,
 char *serialPathNameCount(char *baseName, int destDirType,
 	CertObject_t objectType, int serial, int count)
 {
-	char fullPath[64];
-	char dir[64];
+	char fullPath[MAX_CERT_PATH];
+	char dir[MAX_CERT_PATH];
 	char serialStr[64];
 	char *rDest = NULL;
 	int rValue;
+	int needed;
 	int cfgTag = CERTCFG_MAX_PROPERTY;
 
-	/* Do this so that we can calculate the entire length */
+	/* getPrivKeyType() hands back CERT_OBJECT_MAX_OBJECT when it cannot
+	 * identify the key, and that value would index one past the end of
+	 * both objectFileName[] and objectFileExt[] */
+	if ((objectType < 0) || (objectType >= CERT_OBJECT_MAX_OBJECT)) {
+		return NULL;
+	}
+
+	/* baseName has never been part of the generated name; it is kept only
+	 * because it is part of the published prototype */
+	(void)baseName;
+
 	snprintf(serialStr, sizeof(serialStr),"%X", serial);
 	switch (destDirType) {
 	case CERT_DIR_PRIVATE_KEY:
@@ -473,20 +529,19 @@ char *serialPathNameCount(char *baseName, int destDirType,
 	}
 
 	if (CERT_OK == (rValue = CertCfgGetObjectStrValue(cfgTag, dir,
-			MAX_CERT_PATH))) {
-		if (MAX_CERT_PATH >= (strlen(baseName) + 1 +
-				strlen(dir) + 1	+
-				strlen(objectFileName[objectType]) + 1 +
-				strlen(serialStr) + 1 +
-				strlen(objectFileExt[objectType]) + 1)) {
+			sizeof(dir)))) {
+		if (count == 0) {
+			needed = snprintf(fullPath, sizeof(fullPath), "%s/%s%s.%s",
+				dir, objectFileName[objectType],
+				serialStr, objectFileExt[objectType]);
+		} else {
+			needed = snprintf(fullPath, sizeof(fullPath), "%s/%s%s_%d.%s",
+				dir, objectFileName[objectType],
+				serialStr, count - 1, objectFileExt[objectType]);
+		}
 
-			if(count == 0) {
-				sprintf(fullPath, "%s/%s%s.%s", dir, objectFileName[objectType],
-					serialStr, objectFileExt[objectType]);
-			} else {
-				sprintf(fullPath, "%s/%s%s_%d.%s", dir, objectFileName[objectType],
-								serialStr, count-1, objectFileExt[objectType]);
-			}
+		/* only hand back a path that was not truncated */
+		if ((needed > 0) && ((size_t)needed < sizeof(fullPath))) {
 
 			/* Let's check to see if we've already installed this certificate */
 //			if(CERT_OBJECT_C_AUTHORIZATION == objectType) {
@@ -502,10 +557,7 @@ char *serialPathNameCount(char *baseName, int destDirType,
 //				}
 //			}
 
-			rDest = (char *)malloc(strlen(fullPath) + 1);
-
-			// only do copy if path was short enough:
-			strcpy(rDest, fullPath);
+			rDest = strdup(fullPath);
 		}
 	}
 	return rDest;
@@ -526,20 +578,25 @@ char *serialPathNameCount(char *baseName, int destDirType,
 
 char *fileBaseName(const char *pPath)
 {
-	char * name;
+  char *name;
   char *basePtr;
-  char *base = (char *)malloc(strlen(pPath) + 1);
+  char *base;
 
-  strcpy(base, pPath);
+  if (NULL == pPath)
+    return NULL;
 
-  if (0 != (basePtr = strrchr((const char *)base, '.')))
-    basePtr[0] = 0;
+  base = strdup(pPath);
+
+  if (NULL == base)
+    return NULL;
+
+  if (NULL != (basePtr = strrchr(base, '.')))
+    basePtr[0] = '\0';
 
   name = basename(base);
-  strcpy(base, name);
+  memmove(base, name, strlen(name) + 1);
 
   return base;
-
 }
 
 
@@ -566,7 +623,7 @@ int getPrivKeyType(EVP_PKEY *pkey)
 {
   int rValue = CERT_OBJECT_MAX_OBJECT;
 
-  switch (EVP_PKEY_type(pkey))
+  switch (EVP_PKEY_base_id(pkey))
     {
     case EVP_PKEY_RSA:
       rValue = CERT_OBJECT_RSA_PRIVATE_KEY;

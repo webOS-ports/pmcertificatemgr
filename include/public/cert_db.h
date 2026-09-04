@@ -28,6 +28,12 @@
 #ifndef __CERT_DB_H__
 #define __CERT_DB_H__
 
+#include <stdint.h>
+
+#include <openssl/x509.h>
+
+#include "cert_mgr.h"
+
 #include <openssl/txt_db.h>
 
 /*! Properties of the data base itself    */

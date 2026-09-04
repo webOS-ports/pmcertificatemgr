@@ -16,7 +16,7 @@
 #
 # LICENSE@@@
 
-cmake_minimum_required(VERSION 2.8.7)
+cmake_minimum_required(VERSION 3.10)
 
 project(PmCertificateMgr C)
 
@@ -42,8 +42,25 @@ webos_add_linker_options(ALL --no-undefined -O0 -g)
 
 add_definitions(-DCERT_DEF_CONF_FILE="${WEBOS_INSTALL_SYSCONFDIR}/ssl/openssl.cnf")
 
-add_library(PmCertificateMgr SHARED src/cert_cfg.c src/cert_db.c src/cert_mgr.c src/cert_pkcs.c src/cert_utils.c src/cert_x509.c )
+set(PMCERTMGR_SOURCES src/cert_cfg.c src/cert_db.c src/cert_mgr.c src/cert_pkcs.c src/cert_utils.c src/cert_x509.c)
+
+# The debug helpers (strProps[], logSSLErrors(), CertX509Dump(), ...) are only
+# referenced when D_DEBUG_ENABLED is set, and PmCertificateMgrTest needs them.
+option(D_DEBUG_ENABLED "Build the debug tracing helpers" OFF)
+if(D_DEBUG_ENABLED)
+	add_definitions(-DD_DEBUG_ENABLED)
+	list(APPEND PMCERTMGR_SOURCES src/cert_debug.c)
+endif()
+
+add_library(PmCertificateMgr SHARED ${PMCERTMGR_SOURCES})
 target_link_libraries(PmCertificateMgr ${OPENSSL_LDFLAGS} ${GLIB2_LDFLAGS})
+
+# Off by default so the packaged build is unchanged.
+option(BUILD_TESTS "Build the test programs under src/test" OFF)
+if(BUILD_TESTS)
+	enable_testing()
+	add_subdirectory(src/test)
+endif()
 
 webos_build_library()
 webos_config_build_doxygen(doc Doxyfile)

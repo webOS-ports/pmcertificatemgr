@@ -45,16 +45,6 @@
 #include "cert_db.h"
 #include "cert_debug.h"
 
-/* workaround for missing OPENSSL_PSTRING type in openssl-0.9.8k
- * TODO: remove when support for openssl-0.9.8k not needed (>openssl-1.0.0i used)
- */
-#ifndef sk_OPENSSL_PSTRING_num
-#  define sk_OPENSSL_PSTRING_num sk_num
-#endif
-#ifndef sk_OPENSSL_PSTRING_value
-#  define sk_OPENSSL_PSTRING_value sk_value
-#endif
-
 int CertLockFile(int fileType);
 int CertUnlockFile(int fileType);
 
@@ -194,6 +184,12 @@ CertReturnCode_t CertInitDatabase(char *dbName)
         }
       else
         {
+          /* every entry point re-reads the database; without this the
+           * previous copy was simply dropped on the floor */
+          if ((NULL != clocaldb) && (clocaldb != db))
+            {
+              free_index(clocaldb);
+            }
           clocaldb = db;
         }
       CertUnlockFile(CERT_DATABASE_LOCK);
@@ -253,6 +249,12 @@ CertReturnCode_t CertReadDatabase(char *dbName)
         }
       else
         {
+          /* every entry point re-reads the database; without this the
+           * previous copy was simply dropped on the floor */
+          if ((NULL != clocaldb) && (clocaldb != db))
+            {
+              free_index(clocaldb);
+            }
           clocaldb = db;
         }
       CertUnlockFile(CERT_DATABASE_LOCK);
@@ -297,24 +299,33 @@ CertReturnCode_t CertWriteDatabase(char *dbName)
 
   if (0 == (CertLockFile(CERT_DATABASE_LOCK)))
     {
-      char basename[MAX_CERT_PATH];
+      char baseName[MAX_CERT_PATH];
       char suffix[64];
       char *suffixp;
+      size_t dbNameLen = strlen(dbName);
+
+      suffix[0] = '\0';
+      baseName[0] = '\0';
 
       if (NULL != (suffixp = strrchr(dbName, '.')))
         {
           suffixp++;
-          strcpy(suffix, suffixp);
-
+          /* used to be an unbounded strcpy into a 64 byte buffer */
+          snprintf(suffix, sizeof(suffix), "%s", suffixp);
         }
-      if (suffixp && ((suffixp - dbName) < strlen(dbName)))
+      if (suffixp && ((size_t)(suffixp - dbName) < dbNameLen))
         {
-          strncpy(basename, dbName, (suffixp - dbName) - 1);
-          basename[(suffixp - dbName) - 1] = '\0';
+          size_t baseLen = (size_t)(suffixp - dbName) - 1;
+
+          if (baseLen >= sizeof(baseName))
+            baseLen = sizeof(baseName) - 1;
+
+          memcpy(baseName, dbName, baseLen);
+          baseName[baseLen] = '\0';
         }
       if (NULL != (db = CertLockDatabase(2)))
         {
-          save_index(basename, suffix, db);
+          save_index(baseName, suffix, db);
           CertUnlockDatabase();
         }
       else
@@ -423,23 +434,18 @@ CertReturnCode_t CertGetDatabaseStrValue(int32_t index,
             case CERT_DATABASE_ITEM_SERIAL:
             case CERT_DATABASE_ITEM_FILE:
             case CERT_DATABASE_ITEM_NAME:
-              if (len < strlen(pp[property]))
-                {
-                  result = CERT_BUFFER_LIMIT_EXCEEDED;
-                }
-              else
-                {
-                  if (!strlen(pp[property]))
-                    {
-                      propertyStr[0] = '\0';
-                    }
-                  else
-                    {
-                      strncpy(propertyStr,
-                              pp[property],
-                              strlen(pp[property]) + 1);
-                    }
-                }
+              {
+                size_t propLen = strlen(pp[property]);
+
+                if ((len <= 0) || ((size_t)len < propLen))
+                  {
+                    result = CERT_BUFFER_LIMIT_EXCEEDED;
+                  }
+                else
+                  {
+                    memcpy(propertyStr, pp[property], propLen + 1);
+                  }
+              }
               break;
 
             default:
@@ -482,9 +488,9 @@ char *newMem(const void *data, int32_t len)
 {
   char *nBuf;
 
-  nBuf = (void *)malloc(len + 1);
+  nBuf = (char *)malloc(len + 1);
   if (NULL == nBuf)
-    return 0;
+    return NULL;
 
   memcpy(nBuf, data, len);
   nBuf[len] = 0;
@@ -662,6 +668,10 @@ CertReturnCode_t CertUpdateDatabaseItem(char *dbName,
 {
   CA_DB *db;
   char dbPath[MAX_CERT_PATH];
+
+  /* dbName is part of the published prototype but the database location
+   * always comes from the configuration, so it is deliberately ignored */
+  (void)dbName;
   int32_t update = 0;
   CertReturnCode_t result;
 
@@ -681,12 +691,16 @@ CertReturnCode_t CertUpdateDatabaseItem(char *dbName,
 
       for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++)
 		{
-          int32_t dbSerialNb;
+          unsigned int dbSerialNb = 0;
 
           pp = (char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
 
-          sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb);
-          if (dbSerialNb == serialNb)
+          if (1 != sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb))
+            {
+              pp = NULL;
+              continue;
+            }
+          if ((int32_t)dbSerialNb == serialNb)
             {
               break;
             }
@@ -776,7 +790,7 @@ CertReturnCode_t CertDatabaseCountCertsDirect(char        *dbName,
   if (NULL != (db = CertLockDatabase(7)))
     {
       int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
-      for (i = 0, size = 0; i < nCertsTotal; i++)
+      for (i = 0; i < nCertsTotal; i++)
         {
           const char **pp;
 
@@ -841,7 +855,7 @@ CertReturnCode_t CertListDatabaseCertsByStatusDirect(char *dbName,
   if (NULL != (db = CertLockDatabase(7)))
     {
       int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
-      for (i = 0, size = 0; i < nCertsTotal; i++)
+      for (i = 0; i < nCertsTotal; i++)
         {
           const char **pp;
 
@@ -849,16 +863,23 @@ CertReturnCode_t CertListDatabaseCertsByStatusDirect(char *dbName,
           if ((CERT_STATUS_ALL == certStatus)  ||
               (pp[CERT_DATABASE_ITEM_STATUS][0] == statusValues[certStatus]))
             {
-              //              fprintf(stdout, "captured serial #%s\n",
-              //      pp[CERT_DATABASE_ITEM_SERIAL]);
-              sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &(certList[i]));
+              unsigned int dbSerialNb;
 
-              if (size == *certNb)
+              /* the bounds check used to happen *after* the write, and the
+               * write was indexed by the database row rather than by the
+               * number of matches collected so far -- both of which overran
+               * the caller's array */
+              if (size >= *certNb)
                 {
                   result = CERT_INSUFFICIENT_BUFFER_SPACE;
                   break;
                 }
-              size++;
+
+              if (1 == sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb))
+                {
+                  certList[size] = (int32_t)dbSerialNb;
+                  size++;
+                }
             }
         }
     }
@@ -931,7 +952,6 @@ CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
                                                    char   *buf,
                                                    int     bufLen)
 {
-  int32_t size;
   int32_t i;
   CA_DB *db;
   CertReturnCode_t result;
@@ -943,15 +963,17 @@ CertReturnCode_t CertGetNameFromSerialNumberDirect(char *dbName,
     {
       int nCertsTotal = sk_OPENSSL_PSTRING_num(db->db->data);
 
-      for (i = 0, size = 0; i < nCertsTotal; i++)
+      for (i = 0; i < nCertsTotal; i++)
 		{
-          int dbSerialNb;
+          unsigned int dbSerialNb = 0;
           const char **pp;
 
           pp = (const char **)sk_OPENSSL_PSTRING_value(db->db->data, i);
-          sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb);
 
-          if (dbSerialNb == serialNb)
+          if (1 != sscanf(pp[CERT_DATABASE_ITEM_SERIAL], "%x", &dbSerialNb))
+            continue;
+
+          if ((int32_t)dbSerialNb == serialNb)
             {
               int len;
               //              fprintf(stdout, "captured serial #%s\n",
@@ -1360,7 +1382,7 @@ int parse_yesno(const char *str, int def)
 		case 'y': /* yes */
 		case 'Y': /* YES */
 		case '1': /* 1 */
-			ret = 0;
+			ret = 1;
 			break;
 		default:
 			ret = def;

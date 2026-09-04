@@ -25,7 +25,7 @@
 
 #ifdef D_DEBUG_ENABLED
 
-#define MAX_CFG_STR_PROPS = 16
+#define MAX_CFG_STR_PROPS 16
 
 extern char *strProps[];
 extern char *strPropNames[];
@@ -33,7 +33,8 @@ extern char *strErrorNames[];
 
 #define PRINT_RETURN_CODE(a) if (a){printf("Error in %s line %d (%d): %s\n", __FUNCTION__, __LINE__, a, (a < CERT_MAX_RETURN_CODE) ? strErrorNames[a] : "UNKNOWN ERROR");}
 #define PRINT_SIMPLE_RETURN_CODE(a) printf("%s: (%d)\n", (a < CERT_MAX_RETURN_CODE) ? strErrorNames[a] : "UNKNOWN", a)
-#define PRINT_CFG_STR_PROPS(A, B) printf("DEBUG: func = %s, property = %s, prop value = %s\n", __FUNCTION__, strProps[A], B)
+/* B is routinely NULL (clearing a property), which is undefined for %s */
+#define PRINT_CFG_STR_PROPS(A, B) printf("DEBUG: func = %s, property = %s, prop value = %s\n", __FUNCTION__, strProps[A], (B) ? (B) : "(null)")
 #define PRINT_ERROR2(A, B) printf("ERROR: func = %s, err = %s, value = %d\n", __FUNCTION__, A, B);
 #define PRINT_ERROR4(A, B, C, D) printf("ERROR: func = %s, err = %s, value = %s, %s = %d\n", __FUNCTION__, A, B, C, D);
 

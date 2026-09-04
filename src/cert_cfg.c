@@ -184,6 +184,9 @@ int CertCfgSetObjectValue(certcfg_Property_t certObjProperty, int value)
 {
   int result = CERT_GENERAL_FAILURE;
 
+  (void)certObjProperty;
+  (void)value;
+
 #ifdef D_DEBUG_ENABLED
   result =  CERT_OK;
 #endif
@@ -263,8 +266,7 @@ int CertCfgSetObjectStrValue(certcfg_Property_t certObjStrProperty,
   // check for reasonable size
   if (!value)
     {
-      if (configObject.descStr[certObjStrProperty])
-		free(configObject.descStr[certObjStrProperty]);
+      free(configObject.descStr[certObjStrProperty]);
       configObject.descStr[certObjStrProperty] =  NULL;
     }
   else
@@ -275,7 +277,18 @@ int CertCfgSetObjectStrValue(certcfg_Property_t certObjStrProperty,
         }
       else
         {
-          configObject.descStr[certObjStrProperty] = strdup(value);
+          char *dup = strdup(value);
+
+          if (NULL == dup)
+            {
+              result = CERT_GENERAL_FAILURE;
+            }
+          else
+            {
+              /* the old value used to be overwritten and leaked */
+              free(configObject.descStr[certObjStrProperty]);
+              configObject.descStr[certObjStrProperty] = dup;
+            }
         }
     }
   PRINT_CFG_STR_PROPS(certObjStrProperty, value);
@@ -314,21 +327,30 @@ int CertCfgGetObjectStrValue(certcfg_Property_t certObjStrProperty, char *buf, i
 
       rValue = CERT_UNKNOWN_PROPERTY;
     }
-  else {
-      if (configObject.descStr[certObjStrProperty])  {
-	  if (bufLen <= (sLen = strlen(configObject.descStr[certObjStrProperty])))
-	  {
-	      PRINT_ERROR2("Insufficient buffor for the string property", sLen);
-	      rValue = CERT_INSUFFICIENT_BUFFER_SPACE;
-	  }
-	  else
-	  {
-	      strncpy(buf, configObject.descStr[certObjStrProperty], sLen);
-	      buf[sLen] = '\0';
-	      PRINT_CFG_STR_PROPS(certObjStrProperty, buf);
-	  }
-      }
-  }
+  else if (NULL == buf || bufLen <= 0)
+    {
+      rValue = CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
+  else if (NULL == configObject.descStr[certObjStrProperty])
+    {
+      /* Reporting CERT_OK here while leaving buf untouched left every
+       * caller reading an uninitialised buffer */
+      buf[0] = '\0';
+      rValue = CERT_PROPERTY_NOT_FOUND;
+    }
+  else
+    {
+      if (bufLen <= (sLen = strlen(configObject.descStr[certObjStrProperty])))
+        {
+          PRINT_ERROR2("Insufficient buffer for the string property", sLen);
+          rValue = CERT_INSUFFICIENT_BUFFER_SPACE;
+        }
+      else
+        {
+          memcpy(buf, configObject.descStr[certObjStrProperty], sLen + 1);
+          PRINT_CFG_STR_PROPS(certObjStrProperty, buf);
+        }
+    }
 
   return rValue;
 }
@@ -373,9 +395,9 @@ static int populateConfig(void)
   for (i = CERTCFG_ROOT_DIR; i < CERTCFG_MAX_PROPERTY ; i++)
     {
       char *str;
-      /* zero all pointers so if there's no conf we dont' have
-      ** bogus info */
-      configObject.descStr[i] = '\0';
+      /* release any previous value so if there's no conf we don't have
+      ** bogus info. Assigning '\0' here just dropped the old pointer. */
+      CertCfgSetObjectStrValue(i, NULL);
 
       str = NCONF_get_string(configObject.conf,
 			     configObject.descStr[CERTCFG_CONFIG_NAME],

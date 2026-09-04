@@ -97,45 +97,72 @@ int Mkdir(const char *path)
 {
     struct stat statbuf;
     int rc;
-    const char *parent = dirname(strdup(path));
+    char *dup;
+    const char *parent;
 
-    if (NULL == parent) {
+    if (NULL == path) {
         return -1;
     }
-    else {
-        //do not make a directory if it exists
-        rc = stat(path,&statbuf);
-        if (rc == 0) {
-            //directory exists
-            free((void*)parent);
-            return 0;
-        }
 
-        rc = stat(parent,&statbuf);
-        if (rc == -1) {
-            if (errno == ENOENT && path != NULL) {
-                // parent is missing, make it
-                rc = Mkdir(parent);
-            }
-            else {
-                free((void*)parent);
-                return rc; // fail
+    /* dirname() may return a pointer into its argument or a pointer to
+     * static storage, so the strdup'd buffer is what has to be freed --
+     * not dirname()'s return value */
+    dup = strdup(path);
+
+    if (NULL == dup) {
+        return -1;
+    }
+
+    parent = dirname(dup);
+
+    //do not make a directory if it exists
+    rc = stat(path,&statbuf);
+    if (rc == 0) {
+        //directory exists
+        free(dup);
+        return 0;
+    }
+
+    rc = stat(parent,&statbuf);
+    if (rc == -1) {
+        if (errno == ENOENT) {
+            // parent is missing, make it
+            rc = Mkdir(parent);
+            if (rc != 0) {
+                free(dup);
+                return rc;
             }
         }
-        // actually make the dir
-        rc = mkdir(path,0777);
-        free((void*)parent);
-        return rc;
+        else {
+            free(dup);
+            return rc; // fail
+        }
     }
+    // actually make the dir
+    rc = mkdir(path,0777);
+    free(dup);
+    return rc;
 }
 
 int Touch(const char *path, const char* data)
 {
     int fd, rc;
+    char *dup;
+
+    if (NULL == path) {
+	return -1;
+    }
 
     // make sure the parent dir exists:
-    const char *parent = dirname(strdup(path));
-    rc = Mkdir(parent);
+    dup = strdup(path);
+
+    if (NULL == dup) {
+	return -1;
+    }
+
+    rc = Mkdir(dirname(dup));
+    free(dup);
+
     if (rc != 0)
 	return rc;
 
@@ -143,16 +170,22 @@ int Touch(const char *path, const char* data)
     if (fd < 0 ) {
 	return -1;
     }
-    else {
-	if (data) {
-	    write(fd,data,strlen(data));
+
+    if (data) {
+	size_t len = strlen(data);
+	ssize_t written = write(fd,data,len);
+
+	if ((written < 0) || ((size_t)written != len)) {
+	    close(fd);
+	    return -1;
 	}
-	close(fd);
-        return 0;
     }
+
+    close(fd);
+    return 0;
 }
 
-CertReturnCode_t SetupCertMgrEnviroment() {
+CertReturnCode_t SetupCertMgrEnviroment(void) {
 	int32_t result = CERT_OK;
 	char dbName[MAX_CERT_PATH];
 //	FILE *ifp;
@@ -167,44 +200,56 @@ CertReturnCode_t SetupCertMgrEnviroment() {
 //	} else {
 //		ifp = fopen(dbName, mode);
 //		if (ifp == NULL) {
-			char certPath[64];
-			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_CERT_DIR, certPath, 64)))
-					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read cert path");
-				strcpy(certPath, "/var/ssl/certs");
+			/* Every directory the configuration names has to exist
+			 * before anything is installed. This used to create only
+			 * the certificate and private key directories, so
+			 * CertAddTrustedCert() and the trusted-CA link that
+			 * CertAddAuthorizedCert() makes both failed with ENOENT
+			 * on a fresh device -- silently, since neither checks.
+			 *
+			 * The buffers here were char[64] asked to hold up to
+			 * MAX_CERT_PATH, so a configured path over 63 characters
+			 * failed to read and silently fell back to a hardcoded
+			 * /var/ssl, provisioning a store nothing had named. */
+			static const certcfg_Property_t dirProps[] = {
+				CERTCFG_CERT_DIR,
+				CERTCFG_PRIVATE_KEY_DIR,
+				CERTCFG_PUBLIC_KEY_DIR,
+				CERTCFG_CRL_DIR,
+				CERTCFG_PACKAGE_DIR,
+				CERTCFG_AUTH_CERT_DIR,
+				CERTCFG_TRUSTED_CA_DIR
+			};
+			char certPath[MAX_CERT_PATH];
+			size_t n;
+
+			for (n = 0; n < sizeof(dirProps) / sizeof(dirProps[0]); n++) {
+				/* not every property has to be configured */
+				if ((CERT_OK != CertCfgGetObjectStrValue(dirProps[n],
+						certPath, sizeof(certPath)))
+						|| (!strlen(certPath))) {
+					continue;
+				}
+
+				if (Mkdir(certPath) != 0) {
+					fprintf(stderr, "ERROR making dir '%s'\n", certPath);
+				}
 			}
 
-			if (Mkdir(certPath) != 0) {
-				fprintf(stderr, "ERROR making dir '%s'\n", certPath);
-			}
-
-			if ( Touch(dbName,NULL) != 0) {
+			if (Touch(dbName, NULL) != 0) {
 				fprintf(stderr, "ERROR touching '%s'\n", dbName);
 			}
 
 			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_CERT_SERIAL_NAME, certPath, 64)))
+					CERTCFG_CERT_SERIAL_NAME, certPath, sizeof(certPath))))
 					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read cert path");
-				strcpy(certPath, "/var/ssl/serial");
+				fprintf(stderr, "%s: no serial file configured\n",
+					__FUNCTION__);
+				return CERT_UNDEFINED_DESTINATION;
 			}
 
-			//sprintf(command, "echo \'01\' > %s", certPath);
-			//fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (Touch(certPath,"01\n")) {
+			if (Touch(certPath, "01\n")) {
 				fprintf(stderr, "ERROR writing '%s'\n", certPath);
-			}
-
-			if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-					CERTCFG_PRIVATE_KEY_DIR, certPath, 64)))
-					|| (!strlen(certPath))) {
-				perror("CertInitCertMgr unable to read private key path");
-				strcpy(certPath, "/var/ssl/private");
-			}
-
-			if (Mkdir(certPath) != 0) {
-				fprintf(stderr, "ERROR creating dir '%s'\n", certPath);
 			}
 
 			result = CERT_OK;
@@ -265,7 +310,7 @@ CertReturnCode_t CertInitCertMgr(const char *configFile)
 {
     static int32_t sInited = 0;
     int32_t result = CERT_OK;
-    char *configName = 0; //= (char *)configFile;
+    char *configName = NULL; //= (char *)configFile;
 
     if (!sInited) {
 	sInited = 1;
@@ -281,10 +326,14 @@ CertReturnCode_t CertInitCertMgr(const char *configFile)
 	}
 
 	if (CERT_OK == result) {
-	    char rootPath[64];
+	    /* was char[64]; a longer configured root silently became "."
+	     * and dropped the lock file into the current directory */
+	    char rootPath[MAX_CERT_PATH];
 	    if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-		CERTCFG_ROOT_DIR, rootPath, 64))) || (!strlen(rootPath))) {
-		g_strlcpy(rootPath, ".", sizeof(rootPath));
+		CERTCFG_ROOT_DIR, rootPath, sizeof(rootPath)))) || (!strlen(rootPath))) {
+		fprintf(stderr, "%s: no root directory configured\n", __FUNCTION__);
+		sInited = 0;
+		return CERT_UNDEFINED_ROOT_DIR;
 	    }
 	    if (CERT_OK != (result = CertInitLockFiles(rootPath))) {
 		perror("CertInitCertMgr");
@@ -791,24 +840,63 @@ CertReturnCode_t CertRemoveCertificateDirect(int32_t serialNb,
 } /*--** CertRemoveCertificate **--*/
 
 
-CertReturnCode_t removeLinkFiles() {
+CertReturnCode_t removeLinkFiles(void) {
 	CertReturnCode_t result = 0;
-	char certPath[64] = {'\0'};
-	gchar* command = NULL;
+	char certPath[MAX_CERT_PATH] = {'\0'};
+	DIR *dir;
+	struct dirent *entry;
 
 	if ((CERT_OK != (result = CertCfgGetObjectStrValue(
-			CERTCFG_CERT_DIR, certPath, 64)))
+			CERTCFG_CERT_DIR, certPath, sizeof(certPath))))
 			|| (!strlen(certPath))) {
 		perror("CertInitCertMgr unable to read cert path");
-		strcpy(certPath, "/var/ssl/certs");
+		snprintf(certPath, sizeof(certPath), "%s", "/var/ssl/certs");
 	}
 
-	command = g_strdup_printf( "rm -f `for f in $(find %s -type l); do if [ ! -e \"$f\" ]; then echo $f; fi; done`",certPath);
-	fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-	if (-1 == system(command)) {
-		fprintf(stderr, "ERROR removing links\n");
+	/* This used to shell out to
+	 *   rm -f `for f in $(find <dir> -type l); do ... done`
+	 * via system(3), which forks /bin/sh, breaks on any path containing
+	 * whitespace or a shell metacharacter, and cannot report which entry
+	 * failed. Walk the directory and unlink dangling symlinks directly. */
+	if (NULL == (dir = opendir(certPath))) {
+		fprintf(stderr, "ERROR %d opening '%s'\n", errno, certPath);
+		return result;
 	}
-	g_free(command);
+
+	while (NULL != (entry = readdir(dir))) {
+		char linkPath[MAX_CERT_PATH];
+		struct stat sb;
+		int len;
+
+		if ((0 == strcmp(entry->d_name, ".")) ||
+			(0 == strcmp(entry->d_name, ".."))) {
+			continue;
+		}
+
+		len = snprintf(linkPath, sizeof(linkPath), "%s/%s", certPath,
+			entry->d_name);
+
+		if ((len < 0) || ((size_t)len >= sizeof(linkPath))) {
+			continue;
+		}
+
+		/* lstat tells us it is a symlink; stat failing tells us the
+		 * target is gone */
+		if ((0 != lstat(linkPath, &sb)) || !S_ISLNK(sb.st_mode)) {
+			continue;
+		}
+
+		if (0 == stat(linkPath, &sb)) {
+			continue;
+		}
+
+		if (0 != unlink(linkPath)) {
+			fprintf(stderr, "ERROR %d removing dangling link '%s'\n",
+				errno, linkPath);
+		}
+	}
+
+	closedir(dir);
 	// XXX also remove links from cache dir
 
 	return result;
@@ -1484,6 +1572,43 @@ static CertReturnCode_t getNextSerialNumber(int32_t *serial) {
 
 /*--***********************************************************************--*/
 /*                                                                           */
+/* FUNCTION: gzipFile                                                        */
+/*       Compress a file in place with gzip(1)                               */
+/* NOTES:                                                                    */
+/*       1) This used to be system("gzip <path>"), which runs the path       */
+/*          through /bin/sh. g_spawn_sync execs gzip directly, so the path   */
+/*          is never parsed as a shell word.                                 */
+/*                                                                           */
+/*--***********************************************************************--*/
+
+static void gzipFile(const char *path)
+{
+    gchar *argv[] = { (gchar *)"gzip", (gchar *)path, NULL };
+    gint status = 0;
+    GError *error = NULL;
+
+    if (NULL == path) {
+	return;
+    }
+
+    if (!g_spawn_sync(NULL, argv, NULL,
+		G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL,
+		NULL, NULL, NULL, NULL, &status, &error)) {
+	fprintf(stderr, "ERROR compressing cert file '%s': %s\n", path,
+		(NULL != error) ? error->message : "unknown");
+	g_clear_error(&error);
+	return;
+    }
+
+    if (!g_spawn_check_wait_status(status, &error)) {
+	fprintf(stderr, "ERROR compressing cert file '%s': %s\n", path,
+		(NULL != error) ? error->message : "unknown");
+	g_clear_error(&error);
+    }
+}
+
+/*--***********************************************************************--*/
+/*                                                                           */
 /* FUNCTION: p12ToFile                                                       */
 /*       Decrypt the PKCS#12 package and populate the given directory with   */
 /*       the results                                                         */
@@ -1517,6 +1642,14 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 		CertPassCallback pcbk, void *pass, int32_t *serial)
 {
     CertReturnCode_t result = CERT_OK;
+
+    /* the destination is derived per object from the configuration, so the
+     * caller-supplied path is unused; it stays for prototype compatibility */
+    (void)pDestPath;
+
+    /* see the note in pemToFile(); pcbk was only ever used as a bogus
+     * EVP_CIPHER argument */
+    (void)pcbk;
 
     fprintf(stdout, "%s %s \n", __FUNCTION__, pPkgPath);
 
@@ -1583,11 +1716,32 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 	    else {
 		pkeyPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY, keyType,
 			serialNb);
-		fp = fopen(pkeyPath, "w");
+
+		if (NULL == pkeyPath) {
+		    EVP_PKEY_free(pkey);
+		    free(baseName);
+		    return CERT_PATH_LIMIT_EXCEEDED;
+		}
+
+		/* fopen's result used to go straight into PEM_write_*() */
+		if (NULL == (fp = fopen(pkeyPath, "w"))) {
+		    perror("cert_mgr");
+		    free(pkeyPath);
+		    EVP_PKEY_free(pkey);
+		    free(baseName);
+		    return CERT_FILE_ACCESS_FAILURE;
+		}
+
 		switch (keyType) {
 		    case CERT_OBJECT_RSA_PRIVATE_KEY:
+			/* the third argument is the EVP_CIPHER to encrypt with.
+			 * This used to pass the CertPassCallback cast to
+			 * const EVP_CIPHER *, which OpenSSL would then have
+			 * dereferenced as a cipher. It only ever worked because
+			 * every in-tree caller passes a NULL callback. Write the
+			 * key unencrypted, as the DER and PEM paths already do. */
 			PEM_write_RSAPrivateKey(fp, EVP_PKEY_get0_RSA(pkey),
-				(const EVP_CIPHER *)pcbk, NULL, 0, 0, pass);
+				NULL, NULL, 0, NULL, NULL);
 			certInstalled++;
 			break;
 		    case CERT_OBJECT_EC_PRIVATE_KEY:
@@ -1604,7 +1758,7 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 			if (NULL != (pfp = fopen(destPath, "a"))) {
 			    PEM_write_ECPrivateKey(pfp,
 				EVP_PKEY_get0_EC_KEY(pkey),
-				    NULL, NULL, 0, 0, NULL);
+				    NULL, NULL, 0, NULL, NULL);
 			    fclose(pfp);
 			} else {
 			    fprintf(stdout,
@@ -1629,7 +1783,7 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 
 	if (NULL != ca) {
 	    int count = 1;
-	    char *caPath = 0;
+	    char *caPath = NULL;
 	    unsigned long hash = 0;
 	    X509 *x509;
 	    FILE *fp;
@@ -1644,6 +1798,13 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 	    while ((ca != NULL) && ((x509 = sk_X509_pop(ca)) != NULL)) {
 		caPath = serialPathNameCount(baseName, CERT_DIR_CERTIFICATES,
 			CERT_OBJECT_C_AUTHORIZATION, serialNb, count++);
+
+		if (NULL == caPath) {
+		    X509_free(x509);
+		    result = CERT_PATH_LIMIT_EXCEEDED;
+		    break;
+		}
+
 		if (NULL != (fp = fopen(caPath, "w"))) {
 		    char filename[MAX_CERT_PATH];
 		    memset(filename, 0, sizeof(filename));
@@ -1666,6 +1827,10 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 		    result = CERT_FILE_ACCESS_FAILURE;
 		}
 
+		/* both of these used to be leaked on every iteration */
+		X509_free(x509);
+		free(caPath);
+		caPath = NULL;
 	    }
 
 	    if(0 < certInstalled && duplicateSerial == 0) {
@@ -1681,7 +1846,6 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 	    //				result = CertWriteDatabase(dbPath);
 	    //			}
 
-	    free(caPath);
 	    if (ca)
 		sk_X509_free(ca);
 	}
@@ -1757,8 +1921,10 @@ CertReturnCode_t removeLink(unsigned long hash, const char *fullpath,
 	int32_t extCounter;
 
 
-	snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
-	pos = strlen(filename);
+	pos = snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
+
+	if ((pos < 0) || ((size_t)pos >= sizeof(filename)))
+	    return CERT_PATH_LIMIT_EXCEEDED;
 
 	result = CERT_GENERAL_FAILURE;
 	/* Look for the link to the cert */
@@ -1852,19 +2018,21 @@ CertReturnCode_t removeFromPath(const int32_t certID, const char *path,
 
     snprintf(certStr, sizeof(certStr), "%X", certID);
 
-    len = strlen(path) + 1;
+    len = strlen(path) + 1;   /* add 1 for the intervening '/' */
+    len += strlen(prefix);    /* prefix used to be left out of this sum */
     len += strlen(certStr) + 1;
     len += strlen(ext) + 2; /* don't forget the dot  */
 
     /* check to see if we have enough space */
-    // add 1 for the intervening '/'
-
     if (MAX_CERT_PATH < len) {
 	result = CERT_PATH_LIMIT_EXCEEDED;
     } else {
 	int counter = 0;
-	snprintf(fullPath, sizeof(fullPath), "%s/%s%s.%s", path, prefix,
-		certStr, ext);
+	int written = snprintf(fullPath, sizeof(fullPath), "%s/%s%s.%s", path,
+		prefix, certStr, ext);
+
+	if ((written < 0) || ((size_t)written >= sizeof(fullPath)))
+	    return CERT_PATH_LIMIT_EXCEEDED;
 
 	if(!strcmp(prefix,""))prefix="ca"; // for pfx certs(eg: E.pfx) delete files of the form caE_0.pem, caE_1.pem
 
@@ -2001,9 +2169,10 @@ CertReturnCode_t mkFileNameFromHash(char *buf, int32_t bufSize,
 	int32_t extCounter;
 	int32_t pos;
 
-	snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
+	pos = snprintf(filename, sizeof(filename), "%s/%08lx.", dir, hash);
 
-	pos = strlen(filename);
+	if ((pos < 0) || ((size_t)pos >= sizeof(filename)))
+	    return CERT_PATH_LIMIT_EXCEEDED;
 
 	/* Let's check to see if we've already installed this certificate */
 	for (extCounter = 0; extCounter < CERT_MAX_HASHED_FILES; ++extCounter) {
@@ -2043,7 +2212,7 @@ CertReturnCode_t mkFileNameFromHash(char *buf, int32_t bufSize,
 
 int returnFileType(const char *file) {
 	int32_t i;
-	char *extn = strrchr(file, '.');
+	const char *extn = strrchr(file, '.');
 
 	if (NULL == extn)
 		return 0;
@@ -2062,6 +2231,11 @@ int returnFileType(const char *file) {
 CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t *serial)
 {
     int32_t serialNb = 0;
+
+    /* the destination is derived per object from the configuration, so the
+     * caller-supplied path is unused; it stays for prototype compatibility */
+    (void)pDestPath;
+
     int32_t duplicateSerial = 0;
     CertReturnCode_t rValue = CERT_GENERAL_FAILURE;
     BIO *bio;
@@ -2094,7 +2268,6 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 	    if (NULL != cert) {
 		fprintf(stdout, "%s cert found \n", __FUNCTION__);
 		char *certPath;
-		FILE *fp;
 
 		if ((duplicateSerial = findSSLCertInLocalStore(cert)) != 0) {
 		    *serial = serialNb = duplicateSerial;
@@ -2129,7 +2302,7 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
 			    CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
 		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSAPrivateKey(fp, dsa, NULL, NULL, 0, 0, NULL);
+			PEM_write_DSAPrivateKey(fp, dsa, NULL, NULL, 0, NULL, NULL);
 			fclose(fp);
 		    } else {
 			fprintf(stdout, "%s unable to write DSA private key\n", __FUNCTION__);
@@ -2165,7 +2338,7 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 			    CERT_OBJECT_RSA_PRIVATE_KEY, serialNb);
 		    if (NULL != (fp = fopen(destPath, "w"))) {
 			PEM_write_RSAPrivateKey(fp, rsa, NULL,
-				NULL, 0, 0, NULL);
+				NULL, 0, NULL, NULL);
 			fclose(fp);
 		    } else {
 			fprintf(stdout, "%s unable to write RSA private key\n", __FUNCTION__);
@@ -2210,7 +2383,7 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 
 		    if (NULL != (fp = fopen(destPath, "a"))) {
 			PEM_write_ECPrivateKey(fp, ec_key,
-				NULL, NULL, 0, 0, NULL);
+				NULL, NULL, 0, NULL, NULL);
 			fclose(fp);
 		    } else {
 			fprintf(stdout,
@@ -2233,19 +2406,13 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 		    fprintf(stdout, "%s crl read 0x%lX\n", __FUNCTION__, X509_NAME_hash(X509_CRL_get_issuer(crl)));
 
 		    char *certPath;
-		    FILE *fp;
 
 		    certPath = serialPathName(baseName, CERT_DIR_CRL,
 			    CERT_OBJECT_CRL, serialNb);
 		    if (NULL != (fp = fopen(certPath, "w"))) {
 			PEM_write_X509_CRL(fp, crl);
 			fclose(fp);
-			char command[255] = {'\0'};
-			snprintf(command, sizeof(command), "gzip %s", certPath);
-			fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (-1 == system(command)) {
-			    fprintf(stderr, "ERROR compressing cert file '%s'\n", certPath);
-			}
+			gzipFile(certPath);
 		    }
 		    free(certPath);
 		    X509_CRL_free(crl);
@@ -2254,6 +2421,12 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 		    fprintf(stdout, "%s no crl \n", __FUNCTION__);
 		}
 	    }
+	    /* the certificate read at the top of this function was never
+	     * released, so every installed certificate leaked one X509 */
+	    if (NULL != cert) {
+		X509_free(cert);
+	    }
+
 	    free(baseName);
 	    fclose(fpIn);
 	} else {
@@ -2276,6 +2449,8 @@ int pem_callback(char* buf, int32_t len, int32_t rwflag, void* cb_arg) {
 	/* Appears this is supposed to return pwd length */
 	PrvPemCallbackStruct* pcs = (PrvPemCallbackStruct*)cb_arg;
 	CertReturnCode_t result;
+
+	(void)rwflag; /* part of OpenSSL's pem_password_cb signature */
 
 	if (pcs->haveCache) {
 		fprintf(stdout, "%s have cache %s \n", __FUNCTION__, pcs->pwdCache);
@@ -2304,6 +2479,16 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 {
     int32_t serialNb = 0;
     int32_t duplicateSerial = 0;
+
+    /* pcbk is a CertPassCallback, which has a different shape from OpenSSL's
+     * pem_password_cb; the private key writers below used to pass it as the
+     * EVP_CIPHER to encrypt with. Keys are written unencrypted. */
+    (void)pcbk;
+
+    /* the destination is derived per object from the configuration, so the
+     * caller-supplied path is unused; it stays for prototype compatibility */
+    (void)pDestPath;
+
     CertReturnCode_t rValue = CERT_GENERAL_FAILURE;
     BIO *bio;
     X509 *cert;
@@ -2341,7 +2526,6 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 	    if (NULL != cert) {
 		fprintf(stdout, "%s cert found \n", __FUNCTION__);
 		char *certPath;
-		FILE *fp;
 
 		// see if this is a duplicate.
 		if ((duplicateSerial = findSSLCertInLocalStore(cert)) != 0) {
@@ -2395,8 +2579,8 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
 			    CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
 		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSAPrivateKey(fp, dsa, (const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
+			PEM_write_DSAPrivateKey(fp, dsa, NULL,
+				NULL, 0, NULL, pwd_ctxt);
 			fclose(fp);
 		    } else {
 			fprintf(stdout, "%s unable to write DSA private key\n", __FUNCTION__);
@@ -2431,8 +2615,8 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
 			    CERT_OBJECT_RSA_PRIVATE_KEY, serialNb);
 		    if (NULL != (fp = fopen(destPath, "w"))) {
-			int ret = PEM_write_RSAPrivateKey(fp, rsa, (const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
+			int ret = PEM_write_RSAPrivateKey(fp, rsa, NULL,
+				NULL, 0, NULL, pwd_ctxt);
 			fprintf(stdout, "%s RSA private key write return = %d\n", __FUNCTION__, ret);
 			fclose(fp);
 		    } else {
@@ -2482,8 +2666,8 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 
 		    if (NULL != (fp = fopen(destPath, "a"))) {
 			PEM_write_ECPrivateKey(fp, ec_key,
-				(const EVP_CIPHER *)pcbk,
-				NULL, 0, 0, pwd_ctxt);
+				NULL,
+				NULL, 0, NULL, pwd_ctxt);
 			fclose(fp);
 		    } else {
 			fprintf(stdout,
@@ -2507,7 +2691,6 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    fprintf(stdout, "%s crl read 0x%lX\n", __FUNCTION__, X509_NAME_hash(X509_CRL_get_issuer(crl)));
 
 		    char *certPath;
-		    FILE *fp;
 
 		    certPath = serialPathName(baseName, CERT_DIR_CRL,
 			    CERT_OBJECT_CRL, serialNb);
@@ -2517,12 +2700,7 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    if (NULL != (fp = fopen(certPath, "w"))) {
 			PEM_write_X509_CRL(fp, crl);
 			fclose(fp);
-			char command[255] = {'\0'};
-			snprintf(command, sizeof(command), "gzip %s", certPath);
-			fprintf(stdout, "%s: command=%s\n", __FUNCTION__, command);
-			if (-1 == system(command)) {
-			    fprintf(stderr, "ERROR compressing cert file '%s'\n", certPath);
-			}
+			gzipFile(certPath);
 		    } else {
 			fprintf(stdout, "%s failed writing file.\n", __FUNCTION__);
 		    }
@@ -2534,6 +2712,12 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 		    fprintf(stdout, "%s no crl \n", __FUNCTION__);
 		}
 	    }
+	    /* the certificate read at the top of this function was never
+	     * released, so every installed certificate leaked one X509 */
+	    if (NULL != cert) {
+		X509_free(cert);
+	    }
+
 	    free(baseName);
 	    fclose(fpIn);
 	} else {
@@ -2573,10 +2757,11 @@ CertReturnCode_t makePathToCert(int32_t serialNb, char *path, int32_t len) {
 	char serialStr[16];
 
 	snprintf(serialStr, sizeof(serialStr), "%X", serialNb);
-	if (len <= (strlen(dir) + strlen(serialStr) + 5)) {
+	if ((len <= 0) ||
+		((size_t)len <= (strlen(dir) + strlen(serialStr) + 5))) {
 	    result = CERT_BUFFER_LIMIT_EXCEEDED;
 	} else {
-	    sprintf(path, "%s/%s.pem", dir, serialStr);
+	    snprintf(path, (size_t)len, "%s/%s.pem", dir, serialStr);
 	}
     }
     return result;
@@ -2630,41 +2815,61 @@ CertReturnCode_t validateCertPath(const char *path, int32_t serialNb,
 	CertReturnCode_t lResult;
 	char caPath[MAX_CERT_PATH];
 	int32_t status = 0;
-	//      X509_STORE      *cert_ctx = NULL;
 
+	*pCMErr = CERT_CM_ALL_OK;
+
+	/* FIXME: CertGetDatabaseInfo() only understands CERT_DATABASE_SIZE, so
+	 * this lookup always fails and the trusted-peer exemption below never
+	 * fires. Implementing a per-item status query in cert_db.c is what is
+	 * actually needed here; until then we fall through to date checking,
+	 * which is the conservative behaviour. */
 	lResult = CertGetDatabaseInfo(CERT_DATABASE_ITEM_STATUS, &status);
-	if (status != (int32_t)statusNames[CERT_STATUS_TRUSTED_PEER]) { /* We trust the certificate per user's blessing, do not invalidate.*/
-	    /* TODO: return that the cert is valid. */
+
+	/* We trust the certificate per user's blessing, do not invalidate. */
+	if ((CERT_OK != lResult) || (status != CERT_STATUS_TRUSTED_PEER)) {
 	    lResult = checkCertDates(cert);
 
 	    if (lResult != CERT_OK) {
 		char dbPath[MAX_CERT_PATH];
-
-		*pCMErr = CERT_CM_ALL_OK;
+		const char *newStatus = NULL;
 
 		if (lResult == CERT_DATE_EXPIRED) {
 		    *pCMErr |= CERT_CM_DATE_EXPIRED;
-		    result = CertUpdateDatabaseItem(dbPath, serialNb,
-			    CERT_DATABASE_ITEM_STATUS,
-			    statusNames[CERT_STATUS_EXPIRED]);
-
+		    newStatus = statusNames[CERT_STATUS_EXPIRED];
 		} else if (lResult == CERT_DATE_PENDING) {
 		    *pCMErr |= CERT_CM_DATE_PENDING;
-		    result = CertUpdateDatabaseItem(dbPath, serialNb,
-			    CERT_DATABASE_ITEM_STATUS,
-			    statusNames[CERT_STATUS_SUSPENDED]);
+		    newStatus = statusNames[CERT_STATUS_SUSPENDED];
+		}
+
+		if (NULL != newStatus) {
+		    /* dbPath used to be passed in uninitialised */
+		    result = CertCfgGetObjectStrValue(CERTCFG_CERT_DATABASE,
+			    dbPath, sizeof(dbPath));
+
+		    if (CERT_OK == result) {
+			result = CertUpdateDatabaseItem(dbPath, serialNb,
+				CERT_DATABASE_ITEM_STATUS, newStatus);
+		    }
 		}
 	    }
 	}
 
-	//      cert_ctx = X509_STORE_new();
+	if (CERT_OK == result) {
+	    if (CERT_OK == CertCfgGetObjectStrValue(CERTCFG_AUTH_CERT_DIR,
+			caPath, sizeof(caPath)) && ('\0' != caPath[0])) {
+		result = checkCert(cert, NULL, caPath);
+	    } else {
+		/* Without an authorized directory there is nothing to anchor
+		 * against. Passing NULL here would hand the decision to OpenSSL's
+		 * system-wide store, so a misconfigured store would report every
+		 * public CA as trusted rather than reporting the misconfiguration. */
+		fprintf(stderr, "%s: %s is not configured; cannot establish trust\n",
+			__FUNCTION__, "authorized");
+		result = CERT_UNDEFINED_DESTINATION;
+	    }
+	}
 
-
-	result = CertCfgGetObjectStrValue(CERTCFG_AUTH_CERT_DIR, caPath,
-		MAX_CERT_PATH);
-	result = checkCert(cert, NULL, caPath);
-
-	// X509_free(cert);
+	X509_free(cert);
     }
 
     return result;
@@ -2675,7 +2880,11 @@ CertReturnCode_t validateCertPath(const char *path, int32_t serialNb,
  */
 int get_key_cb(char *buf, int32_t size, int32_t rwflag, void *userdata) {
     /* userdata is a ptr to the key */
-    int32_t wantsSize = snprintf(buf, size, "%s", (const char *)userdata);
+    int32_t wantsSize;
+
+    (void)rwflag; /* part of OpenSSL's pem_password_cb signature */
+
+    wantsSize = snprintf(buf, size, "%s", (const char *)userdata);
 
     if (wantsSize >= size) {
 	wantsSize = 0;
@@ -2912,9 +3121,9 @@ void makeUnique(char *path) {
 
 #endif
 
-#if D_DEBUG_ENABLED
+#ifdef D_DEBUG_ENABLED
     static void
-logSSLErrors()
+logSSLErrors(void)
 {
     // we'll get this error if bad passwd: PEM_F_PEM_DO_HEADER ???
     for (;; )
@@ -3006,6 +3215,10 @@ int32_t existsIn(const char *file, const char *dir) {
     struct stat buf;
     int32_t err;
 
+    /* FIXME: dir is ignored -- file is expected to already be a full path.
+     * There are no in-tree callers, so nothing depends on this today. */
+    (void)dir;
+
     err = stat(file, &buf);
     return err == 0;
 }
@@ -3046,10 +3259,37 @@ CertReturnCode_t certInfoToBuffer(X509 *cert, certMgrField_t field, char *pBuf,
     return result;
 } /* certInfoToBuffer */
 
+/* Length of the PEM encoding PEM_write_X509() would produce for this
+ * certificate. Stored certificates are written with exactly that call, so two
+ * identical certificates always occupy the same number of bytes on disk --
+ * which makes size a sound, cheap pre-filter for the comparison below.
+ * Returns 0 if the size could not be determined, meaning "do not filter". */
+static long pemEncodedSize(X509 *cert)
+{
+    BIO *mem;
+    long len = 0;
+
+    if (NULL == (mem = BIO_new(BIO_s_mem()))) {
+	return 0;
+    }
+
+    if (PEM_write_bio_X509(mem, cert)) {
+	len = BIO_pending(mem);
+    }
+
+    BIO_free(mem);
+
+    return len;
+}
+
 int findSSLCertInLocalStore(X509 * cert)
 {
+    long wantSize;
+
     if (cert == NULL)
 	return 0;
+
+    wantSize = pemEncodedSize(cert);
 
     int items=0;
     //	SSL_library_init();
@@ -3068,14 +3308,36 @@ int findSSLCertInLocalStore(X509 * cert)
 		result = makePathToCert(serial, dir, MAX_CERT_PATH);
 		if (CERT_OK == result) {
 		    X509 *candidate_cert = NULL;
+		    int match = 0;
+
+		    /* Skip the parse when the file cannot hold the same certificate.
+		     * Without this, installing into a store of N certificates parses
+		     * all N of them, so filling a store costs O(N^2) PEM parses --
+		     * measurably ~21s for 800 certificates against ~0.4s for 100. */
+		    if (0 < wantSize) {
+			struct stat sb;
+
+			if ((0 == stat(dir, &sb)) && (sb.st_size != wantSize)) {
+			    continue;
+			}
+		    }
+
 		    result = CertPemToX509(dir, &candidate_cert);
 		    if (candidate_cert == NULL)
 			continue;
+
 		    if (result == CERT_OK) {
 			//DO COMPARISON
-			if (X509_cmp(candidate_cert,cert) == 0) {
-			    return serial;
-			}
+			match = (X509_cmp(candidate_cert, cert) == 0);
+		    }
+
+		    /* this used to fall out of the loop -- and return early on a
+		     * match -- without ever releasing the candidate, leaking one
+		     * X509 per database entry scanned, on every install */
+		    X509_free(candidate_cert);
+
+		    if (match) {
+			return serial;
 		    }
 		}
 	    }

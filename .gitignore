@@ -33,3 +33,10 @@ patches/
 # Ignore all build directories and their trees. This should exclude all
 # build artifacts.
 BUILD*/
+
+# Lock file created by CertInitLockFiles() when tests run in-tree
+.lock
+
+# CMake build trees
+build/
+compile_commands.json

@@ -41,14 +41,6 @@
 void CertX509Dump(X509 *cert);
 #endif
 
-#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
-static int check(X509_STORE *ctx,
-                 X509 *cert,
-                 STACK_OF(X509) *uchain,
-                 STACK_OF(X509) *tchain, int purpose);
-static STACK_OF(X509) *load_untrusted(char *certfile);
-#endif
-
 int make_property_ssl_equiv(int);
 X509_NAME* get_cname(int, X509*);
 int get_subjectaltname(X509*, char*, int);
@@ -59,6 +51,7 @@ int CertX509ReadStrProperty(X509 *cert, int property, char *pBuf, int len)
 {
   int result = CERT_OK;
   int dataIdx = 0;
+  int truncated = 0;
   X509_NAME *cName;
   //  ASN1_STRING *data;
   int lproperty;
@@ -69,8 +62,23 @@ int CertX509ReadStrProperty(X509 *cert, int property, char *pBuf, int len)
       return result;
     }
 
+  if ((NULL == pBuf) || (0 >= len))
+    {
+      return CERT_INSUFFICIENT_BUFFER_SPACE;
+    }
+
+  /* copy_csv_to_buffer() appends with g_strlcat(), which starts by taking
+   * strlen() of the destination. pBuf comes straight from the caller and was
+   * never initialised here, so that read ran off the end of short buffers. */
+  pBuf[0] = '\0';
+
   lproperty=  make_property_ssl_equiv(property);
   cName= get_cname(property,cert);
+
+  if (NULL == cName)
+    {
+      return CERT_PROPERTY_NOT_FOUND;
+    }
 
   if(lproperty==NID_subject_alt_name){  // if 1
 
@@ -104,23 +112,38 @@ int CertX509ReadStrProperty(X509 *cert, int property, char *pBuf, int len)
 			ASN1_IA5STRING *data;
 			data = X509_NAME_ENTRY_get_data(e);
 			syslog(LOG_INFO,"all common name: %s", (char *) data->data);
-			if(0 < space_left)
-				space_taken= copy_csv_to_buffer(sub_str, (char *)data->data, len, space_left);
+			if (0 < space_left) {
+				space_taken = copy_csv_to_buffer(sub_str, (char *)data->data, len, space_left);
+
+				/* 0 means the value did not fit and was truncated */
+				if (0 == space_taken)
+					truncated = 1;
+			} else {
+				truncated = 1;
+			}
 			space_left= space_left - space_taken;
 		}
 
  }
   if (0 >  dataIdx) {
     return CERT_PROPERTY_NOT_FOUND;
-  } else {
+  }
+
+  if (truncated) {
+    return CERT_BUFFER_LIMIT_EXCEEDED;
+  }
+
+  {
 	  // trim trailing ','
-	  int pBufLen = strlen(pBuf);
-	  if (pBuf[pBufLen-1] == ',')
+	  size_t pBufLen = strlen(pBuf);
+
+	  /* pBufLen is 0 whenever the entry held an empty string; pBuf[-1] is
+	   * not ours to touch */
+	  if ((0 < pBufLen) && (pBuf[pBufLen-1] == ','))
 		pBuf[pBufLen-1] = '\0';
+
 	  return CERT_OK;
   }
-//
-  return CERT_PROPERTY_STRING_NOT_FOUND;
 }
 
 int get_subjectaltname(X509* cert, char* buf, int buf_len){
@@ -151,8 +174,9 @@ int get_subjectaltname(X509* cert, char* buf, int buf_len){
 
       if(gen->type == GEN_IPADD) {
           if(0 < space_left) {
-              const int oline_len = 40;
-	      char oline[oline_len];
+#define IP_STRING_MAX 40
+	      char oline[IP_STRING_MAX];
+	      const int oline_len = IP_STRING_MAX;
 	      oline[0]='\0';
 	      ip_to_string(oline, oline_len, gen);
 	      space_taken= copy_csv_to_buffer(sub_str,  oline, buf_len, space_left);
@@ -346,7 +370,9 @@ int CertX509ReadTimeProperty(X509 *cert, int property, char *pBuf, int len)
 
 void CertX509Dump(X509 *cert)
 {
-#ifdef D_DEBUG_ENABLED
+#ifndef D_DEBUG_ENABLED
+  (void)cert;
+#else
   char outputStr[64];
   int rVal;
 
@@ -432,29 +458,105 @@ void CertX509Dump(X509 *cert)
 }
 
 
+/*****************************************************************************/
+/*                                                                           */
+/* FUNCTION: verifyErrorToReturnCode                                         */
+/*       Map an X509_V_ERR_* verification failure onto a CertReturnCode_t     */
+/*                                                                           */
+/*****************************************************************************/
+
+static int verifyErrorToReturnCode(int verifyError)
+{
+  switch (verifyError)
+    {
+    case X509_V_OK:
+      return CERT_OK;
+
+    case X509_V_ERR_CERT_HAS_EXPIRED:
+    case X509_V_ERR_CRL_HAS_EXPIRED:
+      return CERT_DATE_EXPIRED;
+
+    case X509_V_ERR_CERT_NOT_YET_VALID:
+    case X509_V_ERR_CRL_NOT_YET_VALID:
+      return CERT_DATE_PENDING;
+
+    case X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD:
+    case X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD:
+    case X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD:
+    case X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD:
+      return CERT_FILE_PARSE_ERROR;
+
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT:
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
+    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
+    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
+    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+    case X509_V_ERR_CERT_UNTRUSTED:
+      return CERT_LINK_ERR;
+
+    case X509_V_ERR_CERT_REVOKED:
+      return CERT_BAD_CERTIFICATE;
+
+    case X509_V_ERR_OUT_OF_MEM:
+      return CERT_MEMORY_ERROR;
+
+    default:
+      return CERT_BAD_CERTIFICATE;
+    }
+}
+
+/*****************************************************************************/
+/*                                                                           */
+/* FUNCTION: checkCert                                                       */
+/*       Verify a certificate against the trusted store                      */
+/* INPUT:                                                                    */
+/*       cert: the certificate to verify                                     */
+/*       CAfile: a PEM bundle of trust anchors, or NULL                      */
+/*       CApath: a c_rehash-style directory of anchors, or NULL              */
+/*               If both are NULL, OpenSSL's system-wide store is used. If   */
+/*               either is given, only that source is trusted.               */
+/* RETURN:                                                                   */
+/*       CERT_OK if a trusted chain was built                                */
+/*       CERT_DATE_EXPIRED, CERT_DATE_PENDING for validity window failures   */
+/*       CERT_LINK_ERR if no trusted chain could be built                    */
+/*       CERT_BAD_CERTIFICATE for any other verification failure             */
+/* NOTES:                                                                    */
+/*       1) This used to build the store, populate both lookups and then     */
+/*          return 0 without ever calling X509_verify_cert() -- the call was */
+/*          inside "#if 0" -- so every certificate that parsed was reported  */
+/*          as trusted.                                                      */
+/*       2) CertAddAuthorizedCert() and CertAddTrustedCert() maintain the    */
+/*          <hash>.<n> symlinks that X509_LOOKUP_hash_dir() expects, so an   */
+/*          authorized self-signed certificate anchors itself.               */
+/*                                                                           */
+/*****************************************************************************/
+
 int checkCert(X509 *cert, char *CAfile, char *CApath)
 {
-  X509_STORE *cert_ctx   = NULL;
-
+  X509_STORE *cert_ctx = NULL;
+  X509_STORE_CTX *csc = NULL;
+  X509_LOOKUP *lookup = NULL;
+  int rValue = CERT_GENERAL_FAILURE;
   int i;
-#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
-  int purpose = -1;
-  char *untfile   = NULL;
-  char *trustfile = NULL;
-  STACK_OF(X509) *untrusted = NULL;
-  STACK_OF(X509) *trusted   = NULL;
-#endif
-  X509_LOOKUP *lookup    = NULL;
+
+  if (NULL == cert)
+    return CERT_BAD_CERTIFICATE;
 
   cert_ctx = X509_STORE_new();
 
   if (cert_ctx == NULL)
-    goto end;
+    {
+      rValue = CERT_GENERAL_FAILURE;
+      goto end;
+    }
 
   lookup = X509_STORE_add_lookup(cert_ctx, X509_LOOKUP_file());
 
   if (lookup == NULL)
-    return 123456;
+    {
+      rValue = CERT_GENERAL_FAILURE;
+      goto end;
+    }
 
   if (CAfile)
     {
@@ -462,18 +564,27 @@ int checkCert(X509 *cert, char *CAfile, char *CApath)
       if (!i)
         {
           fprintf(stderr, "Error loading file %s\n", CAfile);
+          rValue = CERT_OPEN_FILE_FAILED;
           goto end;
         }
     }
-  else
+  else if (!CApath)
     {
+      /* Only when the caller named no trust source at all do we fall back to
+       * OpenSSL's system-wide store. Loading it unconditionally -- which is
+       * what the openssl "verify" applet this was lifted from does -- would
+       * mean anything in /etc/ssl/certs verified regardless of whether it
+       * had been authorized here, and ca-certificates is always installed. */
       X509_LOOKUP_load_file(lookup, NULL, X509_FILETYPE_DEFAULT);
     }
 
   lookup = X509_STORE_add_lookup(cert_ctx, X509_LOOKUP_hash_dir());
 
   if (lookup == NULL)
-    return 123456;
+    {
+      rValue = CERT_GENERAL_FAILURE;
+      goto end;
+    }
 
   if (CApath)
     {
@@ -481,144 +592,47 @@ int checkCert(X509 *cert, char *CAfile, char *CApath)
       if (!i)
         {
           fprintf(stderr, "Error loading directory %s\n", CApath);
-          goto end;
-		}
-	}
-  else
-    X509_LOOKUP_add_dir(lookup, NULL, X509_FILETYPE_DEFAULT);
-
-#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
-  if (untfile)
-    {
-      if (!(untrusted = load_untrusted(untfile)))
-        {
-          fprintf(stderr, "Error loading untrusted file %s\n", untfile);
+          rValue = CERT_OPEN_FILE_FAILED;
           goto end;
         }
-	}
-
-	if (trustfile)
-      {
-		if (!(trusted = load_untrusted(trustfile)))
-          {
-			fprintf(stderr, "Error loading untrusted file %s\n", trustfile);
-			goto end;
-          }
-      }
-
-    check(cert_ctx, cert, untrusted, trusted, purpose);
-#endif
-
- end:
-
-	if (cert_ctx != NULL)
-      X509_STORE_free(cert_ctx);
-
-#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
-	sk_X509_pop_free(untrusted, X509_free);
-	sk_X509_pop_free(trusted, X509_free);
-#endif
-
-    return 0;
-}
-
-#if 0 /* FUTURE EXPANSION OF CAPABILITIES  1 */
-static int check(X509_STORE *ctx,
-                 X509 *x,
-                 STACK_OF(X509) *untrustedChain,
-                 STACK_OF(X509) *trustedChain,
-                 int purpose)
-{
-  int i = 0, ret = 0;
-  X509_STORE_CTX *csc;
-
-  //  fprintf(stdout, "%s: ", (file == NULL) ? "stdin" : file);
+    }
+  else if (!CAfile)
+    {
+      X509_LOOKUP_add_dir(lookup, NULL, X509_FILETYPE_DEFAULT);
+    }
 
   csc = X509_STORE_CTX_new();
+
   if (csc == NULL)
     {
+      rValue = CERT_MEMORY_ERROR;
       goto end;
     }
 
-  X509_STORE_set_flags(ctx, CERT_X509_STORE_FLAGS);
-  if (!X509_STORE_CTX_init(csc, ctx, x, untrustedChain))
+  if (!X509_STORE_CTX_init(csc, cert_ctx, cert, NULL))
     {
+      rValue = CERT_GENERAL_FAILURE;
       goto end;
     }
 
-  if (trustedChain)
-    X509_STORE_CTX_trusted_stack(csc, trustedChain);
-
-  if (purpose >= 0)
-    X509_STORE_CTX_set_purpose(csc, purpose);
-
-  i = X509_verify_cert(csc);
-  X509_STORE_CTX_free(csc);
-
-  ret = 0;
- end:
-  if (i)
+  if (1 == X509_verify_cert(csc))
     {
-      fprintf(stdout,"OK\n");
-      ret = 1;
+      rValue = CERT_OK;
+    }
+  else
+    {
+      int verifyError = X509_STORE_CTX_get_error(csc);
+
+      rValue = verifyErrorToReturnCode(verifyError);
     }
 
-
-  if (x != NULL)
-    X509_free(x);
-
-  return(ret);
-}
-
-static STACK_OF(X509) *load_untrusted(char *certfile)
-{
-	STACK_OF(X509_INFO) *sk    = NULL;
-	STACK_OF(X509)      *stack = NULL;
-    STACK_OF(X509)      *ret   = NULL;
-	BIO                 *in    = NULL;
-	X509_INFO           *xi;
-
-	if(!(stack = sk_X509_new_null()))
-      {
-        fprintf(stderr,"memory allocation failure\n");
-		goto end;
-      }
-
-	if(!(in = BIO_new_file(certfile, "r")))
-      {
-		fprintf(stderr, "error opening the file, %s\n", certfile);
-		goto end;
-      }
-
-	/* This loads from a file, a stack of x509/crl/pkey sets */
-	if (!(sk = PEM_X509_INFO_read_bio(in, NULL, NULL, NULL)))
-      {
-		fprintf(stderr,"error reading the file, %s\n",certfile);
-		goto end;
-      }
-
-	/* scan over it and pull out the certs */
-	while (sk_X509_INFO_num(sk))
-      {
-		xi = sk_X509_INFO_shift(sk);
-		if (xi->x509 != NULL)
-          {
-			sk_X509_push(stack, xi->x509);
-			xi->x509 = NULL;
-          }
-		X509_INFO_free(xi);
-      }
-	if (!sk_X509_num(stack))
-      {
-        fprintf(stderr, "no certificates in file, %s\n", certfile);
-        sk_X509_free(stack);
-		goto end;
-      }
-	ret = stack;
  end:
-	BIO_free(in);
-	sk_X509_INFO_free(sk);
-	return(ret);
-}
 
-#endif
+  if (csc != NULL)
+    X509_STORE_CTX_free(csc);
+
+  if (cert_ctx != NULL)
+    X509_STORE_free(cert_ctx);
+
+  return rValue;
+}
