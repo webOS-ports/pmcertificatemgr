@@ -2050,8 +2050,12 @@ CertReturnCode_t removeFromPath(const int32_t certID, const char *path,
 		    *err = errno;
 		    PRINT_ERROR2(strerror(errno), errno);
 		}
-		snprintf(fullPath, sizeof(fullPath), "%s/%s%s_%d.%s", path, prefix,
-			certStr, counter, ext);
+		written = snprintf(fullPath, sizeof(fullPath), "%s/%s%s_%d.%s",
+			path, prefix, certStr, counter, ext);
+		if ((written < 0) || ((size_t)written >= sizeof(fullPath))) {
+		    result = CERT_PATH_LIMIT_EXCEEDED;
+		    break;
+		}
 	    } else {
 		fprintf(stdout, "file not found - %s - %s\n", __FUNCTION__, fullPath);
 		result = CERT_LINK_ERR;
