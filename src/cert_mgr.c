@@ -349,10 +349,9 @@ CertReturnCode_t CertInitCertMgr(const char *configFile)
 		} else if (CERT_OK != (result = CertInitDatabase(dbName))) {
 		    result = CERT_DATABASE_NOT_AVAILABLE;
 		}
-		ERR_load_crypto_strings();
-		ERR_load_PKCS12_strings();
-		OpenSSL_add_all_algorithms();
-
+		/* OpenSSL 1.1.0+ loads its error strings and algorithms
+		 * automatically; the explicit ERR_load_*()/
+		 * OpenSSL_add_all_algorithms() calls are deprecated no-ops */
 		seed_prng();
 	    }
 	}
@@ -3139,11 +3138,7 @@ logSSLErrors(void)
 	}
 	else
 	{
-	    /* Ok to call these multiple times: they're only loaded once
-	       internally. */
-	    ERR_load_CRYPTO_strings();
-	    ERR_load_SSL_strings();
-
+	    /* OpenSSL 1.1.0+ loads its error strings automatically */
 	    char buf[512];
 	    ERR_error_string_n( sslerr, buf, sizeof(buf) );
 
