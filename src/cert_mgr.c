@@ -1606,6 +1606,43 @@ static void gzipFile(const char *path)
     }
 }
 
+/* Replacement for the deprecated PEM_write_{RSA,DSA,EC}PrivateKey() calls.
+** PEM_write_bio_PrivateKey_traditional() emits the same unencrypted
+** traditional blocks ("BEGIN RSA/DSA/EC PRIVATE KEY"), so the files on
+** disk keep their format for whoever reads them back.
+*/
+static int writePrivKeyPem(FILE *fp, EVP_PKEY *pkey)
+{
+    BIO *bio = BIO_new_fp(fp, BIO_NOCLOSE);
+    int ret = 0;
+
+    if (NULL != bio) {
+	ret = PEM_write_bio_PrivateKey_traditional(bio, pkey, NULL, NULL, 0,
+		NULL, NULL);
+	BIO_free(bio);
+    }
+
+    return ret;
+}
+
+/* Replacement for the deprecated PEM_write_RSAPublicKey(). That call wrote
+** the PKCS#1 "BEGIN RSA PUBLIC KEY" form, so keep emitting exactly that:
+** for an RSA key i2d_PublicKey() produces the PKCS#1 RSAPublicKey DER.
+*/
+static int writeRsaPubKeyPem(FILE *fp, EVP_PKEY *pkey)
+{
+    unsigned char *der = NULL;
+    int derLen = i2d_PublicKey(pkey, &der);
+    int ret = 0;
+
+    if (derLen > 0) {
+	ret = PEM_write(fp, PEM_STRING_RSA_PUBLIC, "", der, derLen);
+	OPENSSL_free(der);
+    }
+
+    return ret;
+}
+
 /*--***********************************************************************--*/
 /*                                                                           */
 /* FUNCTION: p12ToFile                                                       */
@@ -1733,14 +1770,12 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 
 		switch (keyType) {
 		    case CERT_OBJECT_RSA_PRIVATE_KEY:
-			/* the third argument is the EVP_CIPHER to encrypt with.
-			 * This used to pass the CertPassCallback cast to
-			 * const EVP_CIPHER *, which OpenSSL would then have
+			/* This used to encrypt with the CertPassCallback cast
+			 * to const EVP_CIPHER *, which OpenSSL would then have
 			 * dereferenced as a cipher. It only ever worked because
 			 * every in-tree caller passes a NULL callback. Write the
 			 * key unencrypted, as the DER and PEM paths already do. */
-			PEM_write_RSAPrivateKey(fp, EVP_PKEY_get0_RSA(pkey),
-				NULL, NULL, 0, NULL, NULL);
+			writePrivKeyPem(fp, pkey);
 			certInstalled++;
 			break;
 		    case CERT_OBJECT_EC_PRIVATE_KEY:
@@ -1755,9 +1790,7 @@ CertReturnCode_t p12ToFile(const char *pPkgPath, const char *pDestPath,
 
 			FILE *pfp;
 			if (NULL != (pfp = fopen(destPath, "a"))) {
-			    PEM_write_ECPrivateKey(pfp,
-				EVP_PKEY_get0_EC_KEY(pkey),
-				    NULL, NULL, 0, NULL, NULL);
+			    writePrivKeyPem(pfp, pkey);
 			    fclose(pfp);
 			} else {
 			    fprintf(stdout,
@@ -2259,9 +2292,6 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 	if (NULL != fpIn) {
 	    char *baseName;
 	    char *destPath;
-	    DSA *dsa = NULL;
-	    RSA *rsa = NULL;
-	    EC_KEY *ec_key = NULL;
 	    X509_CRL *crl = NULL;
 	    FILE *fp;
 
@@ -2299,104 +2329,93 @@ CertReturnCode_t derToFile(const char* pCertPath, const char *pDestPath, int32_t
 	    }
 
 	    if (NULL != cert) {
-		dsa = d2i_DSAPrivateKey_fp(fpIn, NULL);
-		if (NULL != dsa) {
-		    fprintf(stdout, "%s DSA private key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-			    CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSAPrivateKey(fp, dsa, NULL, NULL, 0, NULL, NULL);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write DSA private key\n", __FUNCTION__);
-		    }
-
-		    DSA_free(dsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		dsa = d2i_DSA_PUBKEY_fp(fpIn, NULL);
-		if (NULL != dsa) {
-		    fprintf(stdout, "%s DSA pubkey read\n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
-			    CERT_OBJECT_DSA_PUBLIC_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSA_PUBKEY(fp, dsa);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write DSA pub key\n", __FUNCTION__);
-		    }
-		    DSA_free(dsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		rsa = d2i_RSAPrivateKey_fp(fpIn, NULL);
-		if (NULL != rsa) {
-		    fprintf(stdout, "%s RSA private key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-			    CERT_OBJECT_RSA_PRIVATE_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_RSAPrivateKey(fp, rsa, NULL,
-				NULL, 0, NULL, NULL);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write RSA private key\n", __FUNCTION__);
-		    }
-
-		    RSA_free(rsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		rsa = d2i_RSA_PUBKEY_fp(fpIn, NULL);
-		if (NULL != rsa) {
-		    fprintf(stdout, "%s RSA public key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
-			    CERT_OBJECT_RSA_PUBLIC_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_RSAPublicKey(fp, rsa);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write RSA pub key\n", __FUNCTION__);
-		    }
-
-		    RSA_free(rsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		/* ECDSA */
-		/* NOTE: we append the private key to the cert because
-		** WAPI expects that.  The real (secure) way to do this
-		** is to store the key in keymanager
+		/* d2i_PrivateKey_fp() sniffs the key type itself, replacing
+		** the deprecated d2i_{DSA,RSA,EC}PrivateKey_fp() calls. It
+		** also finds an RSA or EC key that follows the certificate,
+		** which the old rewind-and-retry sequence never could.
 		*/
-		rewind(fpIn);
-		ec_key = d2i_ECPrivateKey_fp(fpIn, NULL);
-		if (NULL != ec_key) {
-		    fprintf(stdout,
-			"%s ECDSA private key read \n", __FUNCTION__);
+		EVP_PKEY *pkey = d2i_PrivateKey_fp(fpIn, NULL);
+		if (NULL != pkey) {
+		    int32_t keyType = getPrivKeyType(pkey);
 
-		    destPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
-			CERT_OBJECT_CERTIFICATE, serialNb);
-
-		    if (NULL != (fp = fopen(destPath, "a"))) {
-			PEM_write_ECPrivateKey(fp, ec_key,
-				NULL, NULL, 0, NULL, NULL);
-			fclose(fp);
-		    } else {
+		    if (CERT_OBJECT_EC_PRIVATE_KEY == keyType) {
+			/* ECDSA */
+			/* NOTE: we append the private key to the cert because
+			** WAPI expects that.  The real (secure) way to do this
+			** is to store the key in keymanager
+			*/
 			fprintf(stdout,
-				"%s unable to write ECDSA private key\n",
-				__FUNCTION__);
-		    }
+			    "%s ECDSA private key read \n", __FUNCTION__);
 
-		    EC_KEY_free(ec_key);
-		    free(destPath);
-		    rValue = CERT_OK;
+			destPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
+			    CERT_OBJECT_CERTIFICATE, serialNb);
+
+			if ((NULL != destPath) &&
+				(NULL != (fp = fopen(destPath, "a")))) {
+			    writePrivKeyPem(fp, pkey);
+			    fclose(fp);
+			} else {
+			    fprintf(stdout,
+				    "%s unable to write ECDSA private key\n",
+				    __FUNCTION__);
+			}
+
+			free(destPath);
+			rValue = CERT_OK;
+		    } else if (keyType < CERT_OBJECT_MAX_OBJECT) {
+			fprintf(stdout, "%s private key read \n", __FUNCTION__);
+			destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
+				keyType, serialNb);
+			if ((NULL != destPath) &&
+				(NULL != (fp = fopen(destPath, "w")))) {
+			    writePrivKeyPem(fp, pkey);
+			    fclose(fp);
+			} else {
+			    fprintf(stdout, "%s unable to write private key\n", __FUNCTION__);
+			}
+
+			free(destPath);
+			rValue = CERT_OK;
+		    }
+		    EVP_PKEY_free(pkey);
+		}
+
+		rewind(fpIn);
+		/* d2i_PUBKEY_fp() replaces the deprecated
+		** d2i_{DSA,RSA}_PUBKEY_fp() pair
+		*/
+		EVP_PKEY *pubkey = d2i_PUBKEY_fp(fpIn, NULL);
+		if (NULL != pubkey) {
+		    int32_t pubType = EVP_PKEY_get_base_id(pubkey);
+
+		    if (EVP_PKEY_DSA == pubType) {
+			fprintf(stdout, "%s DSA pubkey read\n", __FUNCTION__);
+			destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
+				CERT_OBJECT_DSA_PUBLIC_KEY, serialNb);
+			if ((NULL != destPath) &&
+				(NULL != (fp = fopen(destPath, "w")))) {
+			    PEM_write_PUBKEY(fp, pubkey);
+			    fclose(fp);
+			} else {
+			    fprintf(stdout, "%s unable to write DSA pub key\n", __FUNCTION__);
+			}
+			free(destPath);
+			rValue = CERT_OK;
+		    } else if (EVP_PKEY_RSA == pubType) {
+			fprintf(stdout, "%s RSA public key read \n", __FUNCTION__);
+			destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
+				CERT_OBJECT_RSA_PUBLIC_KEY, serialNb);
+			if ((NULL != destPath) &&
+				(NULL != (fp = fopen(destPath, "w")))) {
+			    writeRsaPubKeyPem(fp, pubkey);
+			    fclose(fp);
+			} else {
+			    fprintf(stdout, "%s unable to write RSA pub key\n", __FUNCTION__);
+			}
+			free(destPath);
+			rValue = CERT_OK;
+		    }
+		    EVP_PKEY_free(pubkey);
 		}
 
 		/*
@@ -2515,9 +2534,6 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 	if (NULL != fpIn) {
 	    char *baseName;
 	    char *destPath;
-	    DSA *dsa = NULL;
-	    RSA *rsa = NULL;
-	    EC_KEY *ec_key = NULL;
 	    X509_CRL *crl = NULL;
 
 	    FILE *fp;
@@ -2576,111 +2592,96 @@ CertReturnCode_t pemToFile(const char* pCertPath, const char *pDestPath,
 	    }
 
 	    if (NULL != cert) {
-		dsa = PEM_read_DSAPrivateKey(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != dsa) {
-		    fprintf(stdout, "%s DSA private key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-			    CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSAPrivateKey(fp, dsa, NULL,
-				NULL, 0, NULL, pwd_ctxt);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write DSA private key\n", __FUNCTION__);
-		    }
-
-		    DSA_free(dsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
+		/* PEM_read_PrivateKey() accepts the traditional RSA, DSA and
+		** EC blocks as well as PKCS#8 ones, replacing the deprecated
+		** per-type PEM_read_{DSA,RSA,EC}PrivateKey() calls
+		*/
 		rewind(fpIn);
-		dsa = PEM_read_DSA_PUBKEY(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != dsa) {
-		    fprintf(stdout, "%s DSA pubkey read\n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
-			    CERT_OBJECT_DSA_PUBLIC_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_DSA_PUBKEY(fp, dsa);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write DSA pub key\n", __FUNCTION__);
-		    }
-		    DSA_free(dsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
+		EVP_PKEY *pkey = PEM_read_PrivateKey(fpIn, NULL, pem_callback,
+			&pcs);
+		if (NULL != pkey) {
+		    int32_t keyType = getPrivKeyType(pkey);
 
-		rewind(fpIn);
-		rsa = PEM_read_RSAPrivateKey(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != rsa) {
-		    fprintf(stdout, "%s RSA private key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-			    CERT_OBJECT_RSA_PRIVATE_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			int ret = PEM_write_RSAPrivateKey(fp, rsa, NULL,
-				NULL, 0, NULL, pwd_ctxt);
-			fprintf(stdout, "%s RSA private key write return = %d\n", __FUNCTION__, ret);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write RSA private key\n", __FUNCTION__);
-		    }
-
-		    RSA_free(rsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		rewind(fpIn);
-		rsa = PEM_read_RSA_PUBKEY(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != rsa) {
-		    fprintf(stdout, "%s RSA public key read \n", __FUNCTION__);
-		    destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
-			    CERT_OBJECT_RSA_PUBLIC_KEY, serialNb);
-		    if (NULL != (fp = fopen(destPath, "w"))) {
-			PEM_write_RSAPublicKey(fp, rsa);
-			fclose(fp);
-		    } else {
-			fprintf(stdout, "%s unable to write RSA pub key\n", __FUNCTION__);
-		    }
-
-		    RSA_free(rsa);
-		    free(destPath);
-		    rValue = CERT_OK;
-		}
-
-		/* ECDSA */
-		/* NOTE: we append the private key to the cert because
-		 ** WAPI expects that.  The real (secure) way to do this
-		 ** is to store the key in keymanager
-		 */
-		rewind(fpIn);
-		ec_key = PEM_read_ECPrivateKey(fpIn, NULL, pem_callback, &pcs);
-		if (NULL != ec_key) {
-		    fprintf(stdout,
-			    "%s ECDSA private key read \n", __FUNCTION__);
-		    /*
-		       destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
-		       CERT_OBJECT_DSA_PRIVATE_KEY, serialNb);
-		     */
-
-		    destPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
-			    CERT_OBJECT_CERTIFICATE, serialNb);
-
-		    if (NULL != (fp = fopen(destPath, "a"))) {
-			PEM_write_ECPrivateKey(fp, ec_key,
-				NULL,
-				NULL, 0, NULL, pwd_ctxt);
-			fclose(fp);
-		    } else {
+		    if (CERT_OBJECT_EC_PRIVATE_KEY == keyType) {
+			/* ECDSA */
+			/* NOTE: we append the private key to the cert because
+			 ** WAPI expects that.  The real (secure) way to do this
+			 ** is to store the key in keymanager
+			 */
 			fprintf(stdout,
-				"%s unable to write ECDSA private key\n",
-				__FUNCTION__);
-		    }
+				"%s ECDSA private key read \n", __FUNCTION__);
 
-		    EC_KEY_free(ec_key);
-		    free(destPath);
-		    rValue = CERT_OK;
+			destPath = serialPathName(baseName, CERT_DIR_CERTIFICATES,
+				CERT_OBJECT_CERTIFICATE, serialNb);
+
+			if ((NULL != destPath) &&
+				(NULL != (fp = fopen(destPath, "a")))) {
+			    writePrivKeyPem(fp, pkey);
+			    fclose(fp);
+			} else {
+			    fprintf(stdout,
+				    "%s unable to write ECDSA private key\n",
+				    __FUNCTION__);
+			}
+
+			free(destPath);
+			rValue = CERT_OK;
+		    } else if (keyType < CERT_OBJECT_MAX_OBJECT) {
+			fprintf(stdout, "%s private key read \n", __FUNCTION__);
+			destPath = serialPathName(baseName, CERT_DIR_PRIVATE_KEY,
+				keyType, serialNb);
+			if ((NULL != destPath) &&
+				(NULL != (fp = fopen(destPath, "w")))) {
+			    int ret = writePrivKeyPem(fp, pkey);
+			    fprintf(stdout, "%s private key write return = %d\n", __FUNCTION__, ret);
+			    fclose(fp);
+			} else {
+			    fprintf(stdout, "%s unable to write private key\n", __FUNCTION__);
+			}
+
+			free(destPath);
+			rValue = CERT_OK;
+		    }
+		    EVP_PKEY_free(pkey);
+		}
+
+		rewind(fpIn);
+		/* PEM_read_PUBKEY() replaces the deprecated
+		** PEM_read_{DSA,RSA}_PUBKEY() pair
+		*/
+		EVP_PKEY *pubkey = PEM_read_PUBKEY(fpIn, NULL, pem_callback,
+			&pcs);
+		if (NULL != pubkey) {
+		    int32_t pubType = EVP_PKEY_get_base_id(pubkey);
+
+		    if (EVP_PKEY_DSA == pubType) {
+			fprintf(stdout, "%s DSA pubkey read\n", __FUNCTION__);
+			destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
+				CERT_OBJECT_DSA_PUBLIC_KEY, serialNb);
+			if ((NULL != destPath) &&
+				(NULL != (fp = fopen(destPath, "w")))) {
+			    PEM_write_PUBKEY(fp, pubkey);
+			    fclose(fp);
+			} else {
+			    fprintf(stdout, "%s unable to write DSA pub key\n", __FUNCTION__);
+			}
+			free(destPath);
+			rValue = CERT_OK;
+		    } else if (EVP_PKEY_RSA == pubType) {
+			fprintf(stdout, "%s RSA public key read \n", __FUNCTION__);
+			destPath = serialPathName(baseName, CERT_DIR_PUBLIC_KEY,
+				CERT_OBJECT_RSA_PUBLIC_KEY, serialNb);
+			if ((NULL != destPath) &&
+				(NULL != (fp = fopen(destPath, "w")))) {
+			    writeRsaPubKeyPem(fp, pubkey);
+			    fclose(fp);
+			} else {
+			    fprintf(stdout, "%s unable to write RSA pub key\n", __FUNCTION__);
+			}
+			free(destPath);
+			rValue = CERT_OK;
+		    }
+		    EVP_PKEY_free(pubkey);
 		}
 
 		/*
@@ -2903,24 +2904,23 @@ typedef struct PrvCertCmpStruct {
 } PrvCertCmpStruct;
 
 CertReturnCode_t readEVPKeys(EVP_PKEY *pkey, PrvCertCmpStruct *cs) {
-    DSA* dsa = EVP_PKEY_get1_DSA(pkey);
-    if (NULL != dsa) {
-	unsigned char* c = NULL;
+    unsigned char* c = NULL;
 
-	if (i2d_DSAPrivateKey(dsa, &c)) {
-	    cs->keys[4] = (char *)c;
+    /* i2d_PrivateKey() emits the same traditional encoding per key type
+     * that the deprecated i2d_{DSA,RSA}PrivateKey() calls produced, and
+     * both sides of the comparison go through this same encoder */
+    if (i2d_PrivateKey(pkey, &c) > 0) {
+	switch (EVP_PKEY_get_base_id(pkey)) {
+	    case EVP_PKEY_DSA:
+		cs->keys[4] = (char *)c;
+		break;
+	    case EVP_PKEY_RSA:
+		cs->keys[1] = (char *)c;
+		break;
+	    default:
+		OPENSSL_free(c);
+		break;
 	}
-	DSA_free(dsa);
-    }
-
-    RSA* rsa = EVP_PKEY_get1_RSA(pkey);
-    if (NULL != rsa) {
-	unsigned char* c = NULL;
-
-	if (i2d_RSAPrivateKey(rsa, &c)) {
-	    cs->keys[1] = (char *)c;
-	}
-	RSA_free(rsa);
     }
 
     return true;
@@ -2952,26 +2952,26 @@ CertReturnCode_t readPemKeys(const char *path, PrvCertCmpStruct *cs,
 	}
 
 	rewind(fp);
-	RSA* rsa = PEM_read_RSA_PUBKEY(fp, NULL, get_key_cb, encKey);
-	if (NULL != rsa) {
+	/* PEM_read_PUBKEY() replaces the deprecated per-type
+	 * PEM_read_{RSA,DSA}_PUBKEY() pair; i2d_PublicKey() gives a
+	 * deterministic encoding, and both sides of the comparison go
+	 * through this same encoder */
+	EVP_PKEY* pubkey = PEM_read_PUBKEY(fp, NULL, get_key_cb, encKey);
+	if (NULL != pubkey) {
 	    unsigned char* c = NULL;
+	    int pubType = EVP_PKEY_get_base_id(pubkey);
 
-	    if (i2d_RSAPublicKey(rsa, &c) ) {
-		cs->keys[2] = (char *)c;
+	    if (i2d_PublicKey(pubkey, &c) > 0) {
+		if (EVP_PKEY_RSA == pubType) {
+		    cs->keys[2] = (char *)c;
+		} else if (EVP_PKEY_DSA == pubType) {
+		    cs->keys[4] = (char *)c;
+		} else {
+		    OPENSSL_free(c);
+		}
 	    }
 
-	    RSA_free(rsa);
-	}
-
-	rewind(fp);
-	DSA* dsa = PEM_read_DSA_PUBKEY(fp, NULL, get_key_cb, encKey);
-	if (NULL != dsa) {
-	    unsigned char* c = NULL;
-	    if (i2d_DSAPublicKey(dsa, &c) ) {
-		cs->keys[4] = (char *)c;
-	    }
-
-	    DSA_free(dsa);
+	    EVP_PKEY_free(pubkey);
 	}
 
 	success = true;
