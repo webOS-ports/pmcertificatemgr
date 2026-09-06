@@ -36,9 +36,11 @@ include_directories(${GLIB2_INCLUDE_DIRS})
 webos_add_compiler_flags(ALL ${GLIB2_CFLAGS_OTHER})
 
 include_directories(include/public)
-webos_add_compiler_flags(ALL -Wall -O0 -g)
+# Don't force -O0: it overrides the distro's optimization level and makes
+# glibc warn that _FORTIFY_SOURCE requires compiling with optimization.
+webos_add_compiler_flags(ALL -Wall)
 webos_add_linker_options(ALL --version-script=${CMAKE_SOURCE_DIR}/src/PmCertificateMgrExports.map)
-webos_add_linker_options(ALL --no-undefined -O0 -g)
+webos_add_linker_options(ALL --no-undefined)
 
 add_definitions(-DCERT_DEF_CONF_FILE="${WEBOS_INSTALL_SYSCONFDIR}/ssl/openssl.cnf")
 
