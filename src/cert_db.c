@@ -544,8 +544,8 @@ CertReturnCode_t CertCreateDatabaseItem(X509 *x509, char *name, int32_t serial, 
           Ansitm = X509_get_notAfter(x509);
 
           row[CERT_DATABASE_ITEM_EXPIRATION] =
-            (char *)newMem(Ansitm->data,
-                           Ansitm->length + 1);
+            (char *)newMem(ASN1_STRING_get0_data(Ansitm),
+                           ASN1_STRING_length(Ansitm) + 1);
           if (NULL == row[CERT_DATABASE_ITEM_EXPIRATION])
             {
               result = CERT_MEMORY_ERROR;
@@ -591,8 +591,8 @@ CertReturnCode_t CertCreateDatabaseItem(X509 *x509, char *name, int32_t serial, 
           Ansitm = X509_get_notBefore(x509);
 
           row[CERT_DATABASE_ITEM_START] =
-            (char *)newMem(Ansitm->data,
-                           Ansitm->length + 1);
+            (char *)newMem(ASN1_STRING_get0_data(Ansitm),
+                           ASN1_STRING_length(Ansitm) + 1);
           if (NULL == row[CERT_DATABASE_ITEM_START])
             {
               result = CERT_MEMORY_ERROR;

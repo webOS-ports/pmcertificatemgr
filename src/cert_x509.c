@@ -111,9 +111,9 @@ int CertX509ReadStrProperty(X509 *cert, int property, char *pBuf, int len)
 			/* Do something with e */
 			ASN1_IA5STRING *data;
 			data = X509_NAME_ENTRY_get_data(e);
-			syslog(LOG_INFO,"all common name: %s", (char *) data->data);
+			syslog(LOG_INFO,"all common name: %s", (char *) ASN1_STRING_get0_data(data));
 			if (0 < space_left) {
-				space_taken = copy_csv_to_buffer(sub_str, (char *)data->data, len, space_left);
+				space_taken = copy_csv_to_buffer(sub_str, (char *)ASN1_STRING_get0_data(data), len, space_left);
 
 				/* 0 means the value did not fit and was truncated */
 				if (0 == space_taken)
@@ -168,7 +168,7 @@ int get_subjectaltname(X509* cert, char* buf, int buf_len){
 
       if((gen->type == GEN_DNS)||(gen->type == GEN_URI)){
           if(0 < space_left)
-	  space_taken= copy_csv_to_buffer(sub_str, (char*)gen->d.ia5->data, buf_len, space_left);
+	  space_taken= copy_csv_to_buffer(sub_str, (char*)ASN1_STRING_get0_data(gen->d.ia5), buf_len, space_left);
 	  space_left= space_left -space_taken;
       }
 
@@ -199,12 +199,12 @@ int ip_to_string(char* oline, int oline_len, GENERAL_NAME* gen)
   unsigned char *p;
   char htmp[5];
 
-  p = gen->d.ip->data;
+  p = ASN1_STRING_get0_data(gen->d.ip);
 
-  if(gen->d.ip->length == 4)
+  if(ASN1_STRING_length(gen->d.ip) == 4)
     BIO_snprintf(oline, oline_len,"%d.%d.%d.%d", p[0], p[1], p[2], p[3]);  //sizeof oline replaced by 40
 
-  else if(gen->d.ip->length == 16){
+  else if(ASN1_STRING_length(gen->d.ip) == 16){
     oline[0] = 0;
     for (i = 0; i < 8; i++){
       BIO_snprintf(htmp, sizeof htmp,"%X", p[0] << 8 | p[1]);
